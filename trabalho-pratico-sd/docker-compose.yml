@@ -1,0 +1,76 @@
+# Define a especificação de serviços do Docker Compose para a Fase 1 do Middleware IoT Diverterapia
+services:
+  # Serviço do Broker MQTT utilizando a imagem oficial Eclipse Mosquitto 2
+  mqtt-broker:
+    # Utiliza a imagem oficial eclipse-mosquitto na versão 2
+    image: eclipse-mosquitto:2
+    # Define o nome do container para fácil identificação no Docker
+    container_name: diverterapia-mqtt-broker
+    # Mapeia a porta 1883 do host para a porta 1883 do container
+    ports:
+      # Porta padrão do protocolo MQTT TCP
+      - "1883:1883"
+    # Executa o Mosquitto utilizando o arquivo nativo que habilita conexões anônimas locais na porta 1883
+    command: mosquitto -c /mosquitto-no-auth.conf
+    # Reinicia automaticamente o container caso ocorra falha
+    restart: unless-stopped
+
+  # Serviço da Instância 1 do MongoDB (Armazenamento Replicado do Controlador 1)
+  mongo1:
+    # Utiliza a imagem oficial mais recente do MongoDB
+    image: mongo:latest
+    # Nome do container referente à réplica de banco de dados 1
+    container_name: diverterapia-mongo1
+    # Mapeia a porta 27017 da máquina local para a porta 27017 interna do container
+    ports:
+      # Porta dedicada ao Controlador 1
+      - "27017:27017"
+    # Volume nomeado para persistir os dados do MongoDB 1 entre reinicializações
+    volumes:
+      # Mapeia o volume para o diretório de dados padrão do MongoDB
+      - mongo1_data:/data/db
+    # Reinicia automaticamente o container caso ocorra falha
+    restart: unless-stopped
+
+  # Serviço da Instância 2 do MongoDB (Armazenamento Replicado do Controlador 2)
+  mongo2:
+    # Utiliza a imagem oficial mais recente do MongoDB
+    image: mongo:latest
+    # Nome do container referente à réplica de banco de dados 2
+    container_name: diverterapia-mongo2
+    # Mapeia a porta 27018 da máquina local para a porta 27017 interna do container
+    ports:
+      # Porta dedicada ao Controlador 2
+      - "27018:27017"
+    # Volume nomeado para persistir os dados do MongoDB 2
+    volumes:
+      # Mapeia o volume para o diretório de dados padrão do MongoDB
+      - mongo2_data:/data/db
+    # Reinicia automaticamente o container caso ocorra falha
+    restart: unless-stopped
+
+  # Serviço da Instância 3 do MongoDB (Armazenamento Replicado do Controlador 3)
+  mongo3:
+    # Utiliza a imagem oficial mais recente do MongoDB
+    image: mongo:latest
+    # Nome do container referente à réplica de banco de dados 3
+    container_name: diverterapia-mongo3
+    # Mapeia a porta 27019 da máquina local para a porta 27017 interna do container
+    ports:
+      # Porta dedicada ao Controlador 3
+      - "27019:27017"
+    # Volume nomeado para persistir os dados do MongoDB 3
+    volumes:
+      # Mapeia o volume para o diretório de dados padrão do MongoDB
+      - mongo3_data:/data/db
+    # Reinicia automaticamente o container caso ocorra falha
+    restart: unless-stopped
+
+# Declaração dos volumes gerenciados pelo Docker para persistência das 3 instâncias do MongoDB
+volumes:
+  # Volume de dados da instância mongo1
+  mongo1_data:
+  # Volume de dados da instância mongo2
+  mongo2_data:
+  # Volume de dados da instância mongo3
+  mongo3_data:

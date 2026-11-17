@@ -1,0 +1,120 @@
+# ==============================================================================
+# ARQUIVO DE CONFIGURAÇÃO DO GIT (.gitignore) - PROJETO DIVERTERAPIA
+# Define todos os arquivos e diretórios que NÃO devem ser versionados no GitHub
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Dependências do Node.js (Pacotes externos instalados via npm/yarn/pnpm)
+# ------------------------------------------------------------------------------
+# Ignora a pasta de dependências na raiz do projeto (muito pesada para o repositório)
+node_modules/
+# Ignora a pasta de dependências do frontend Next.js cliente-dashboard
+cliente-dashboard/node_modules/
+# Ignora qualquer subpasta node_modules em subdiretórios
+**/node_modules/
+
+# ------------------------------------------------------------------------------
+# 2. Artefatos de Compilação e Build do Next.js e TypeScript
+# ------------------------------------------------------------------------------
+# Ignora o cache e os arquivos de build gerados pelo framework Next.js
+.next/
+# Ignora o build do Next.js dentro da pasta cliente-dashboard
+cliente-dashboard/.next/
+# Ignora exportações estáticas do Next.js
+out/
+# Ignora a pasta out dentro do cliente-dashboard
+cliente-dashboard/out/
+# Ignora diretórios comuns de saída de compilação
+build/
+# Ignora diretório de saída de pacotes compilados
+dist/
+# Ignora arquivos de cache incremental do compilador TypeScript
+*.tsbuildinfo
+# Ignora arquivo de manifesto de build do Next.js
+next-env.d.ts
+
+# ------------------------------------------------------------------------------
+# 3. Arquivos de Log e Depuração
+# ------------------------------------------------------------------------------
+# Ignora arquivos de log genéricos gerados em tempo de execução
+*.log
+# Ignora logs de depuração gerados pelo npm
+npm-debug.log*
+# Ignora logs de depuração do gerenciador Yarn
+yarn-debug.log*
+# Ignora logs de erro do Yarn
+yarn-error.log*
+# Ignora logs do pnpm
+pnpm-debug.log*
+# Ignora logs do Lerna
+lerna-debug.log*
+
+# ------------------------------------------------------------------------------
+# 4. Variáveis de Ambiente e Segredos (Evita expor senhas e chaves privadas)
+# ------------------------------------------------------------------------------
+# Ignora arquivo de variáveis de ambiente padrão local
+.env
+# Ignora arquivo de variáveis de ambiente de desenvolvimento
+.env.development.local
+# Ignora arquivo de variáveis de ambiente de teste
+.env.test.local
+# Ignora arquivo de variáveis de ambiente de produção local
+.env.production.local
+# Ignora qualquer arquivo de ambiente que termine em .local
+.env*.local
+
+# ------------------------------------------------------------------------------
+# 5. Arquivos Temporários de Armazenamento Local e Dados de Banco
+# ------------------------------------------------------------------------------
+# Ignora arquivo local de armazenamento legado do Controlador 1
+armazenamento1.json
+# Ignora arquivo local de armazenamento legado do Controlador 2
+armazenamento2.json
+# Ignora arquivo local de armazenamento legado do Controlador 3
+armazenamento3.json
+# Ignora volumes ou pastas locais de dados do MongoDB geradas pelo Docker
+data/
+# Ignora dados locais do container MongoDB
+mongo_data/
+# Ignora dados do broker Mosquitto persistidos localmente
+mosquitto_data/
+# Ignora arquivos temporários com extensão .tmp
+*.tmp
+# Ignora arquivos temporários com extensão .temp
+*.temp
+
+# ------------------------------------------------------------------------------
+# 6. Configurações Locais de Editores e IDEs (Específicos da máquina do desenvolvedor)
+# ------------------------------------------------------------------------------
+# Ignora configurações locais do Visual Studio Code
+.vscode/
+# Ignora arquivos de workspaces do VS Code
+*.code-workspace
+# Ignora configurações de IDEs da JetBrains (WebStorm, IntelliJ)
+.idea/
+# Ignora arquivos de swap do editor Vim
+*.swp
+# Ignora arquivos temporários do Vim
+*.swo
+
+# ------------------------------------------------------------------------------
+# 7. Arquivos e Diretórios Ocultos do Sistema Operacional
+# ------------------------------------------------------------------------------
+# Ignora arquivos de metadados gerados pelo macOS
+.DS_Store
+# Ignora qualquer ocorrência de DS_Store em subpastas
+**/.DS_Store
+# Ignora arquivos de cache de miniaturas do Windows
+Thumbs.db
+# Ignora configurações de exibição de pastas do Windows
+ehthumbs.db
+# Ignora configurações personalizadas de ícones de pasta
+Desktop.ini
+
+# ------------------------------------------------------------------------------
+# 8. Pastas e Logs de Ferramentas de IA e Assistentes Locais
+# ------------------------------------------------------------------------------
+# Ignora pastas de cache do Antigravity / Gemini CLI
+.gemini/
+# Ignora diretórios de configurações de agentes locais
+.agents/

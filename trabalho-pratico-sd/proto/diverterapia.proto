@@ -1,0 +1,174 @@
+// Define a sintaxe utilizada pelo protocolo Protocol Buffers (proto3)
+syntax = "proto3";
+
+// Define o pacote do arquivo para evitar colisões de nomenclatura em gRPC
+package diverterapia;
+
+// Mensagem vazia utilizada em chamadas RPC que não necessitam de parâmetros
+message Empty {}
+
+// Mensagem que encapsula o identificador de origem do cliente que invocou a ação
+message OrigemRequest {
+  // Nome ou identificação da aplicação cliente chamadora
+  string origem = 1;
+}
+
+// Parâmetros opcionais para ajuste fino dos três atuadores físicos do ambiente
+message ParametrosAtuadores {
+  // Cor da iluminação RGB
+  string corLuz = 1;
+  // Faixa de áudio ou ruído emitido pelo Smart Speaker
+  string somSpeaker = 2;
+  // Mensagem textual exibida no Visor da Porta
+  string textoDisplay = 3;
+}
+
+// Mensagem com parâmetros para invocação dinâmica de métodos remotos
+message InvocarMetodoRequest {
+  // Nome do método remoto que se deseja executar
+  string metodo = 1;
+  // Identificação do cliente que solicitou a execução
+  string origem = 2;
+  // Objeto contendo os parâmetros opcionais dos atuadores
+  ParametrosAtuadores parametros = 3;
+}
+
+// Mensagem que representa um item individual na Fila de Espera Distribuída de pacientes
+message ItemFilaEsperaMessage {
+  // Nome do paciente na fila
+  string nome = 1;
+  // Estilo musical selecionado pelo paciente
+  string musica = 2;
+  // Cor de iluminação preferida
+  string cor = 3;
+  // Horário em que o paciente realizou o check-in
+  string horario = 4;
+}
+
+// Mensagem que modela um registro no histórico de auditoria do MongoDB
+message RegistroHistoricoMessage {
+  // Data e hora do evento no formato ISO
+  string horario = 1;
+  // Categoria do evento de auditoria
+  string tipo = 2;
+  // Descrição detalhada da ação persistida
+  string descricao = 3;
+}
+
+// Mensagem que encapsula o estado completo da Sala Pediátrica (Diverterapia)
+message EstadoSalaData {
+  // Nível de ruído em decibéis (dB)
+  int32 ruidoDb = 1;
+  // Frequência cardíaca em batimentos por minuto (BPM)
+  int32 bpm = 2;
+  // Booleano indicando presença de paciente na sala
+  bool presenca = 3;
+  // Identificador ou nome do paciente em atendimento
+  string tagId = 4;
+  // Estilo musical favorito do paciente atual
+  string musicaFavorita = 5;
+  // Cor favorita de iluminação do paciente atual
+  string corFavorita = 6;
+  // Estado e cor atual do atuador de Iluminação RGB
+  string iluminacao = 7;
+  // Estado e som atual emitido pelo Smart Speaker
+  string smartSpeaker = 8;
+  // Texto atualmente exibido no Display da Porta
+  string displayPorta = 9;
+  // Indica se o protocolo de Regulação Sensorial está ativo
+  bool modoCalmaAtivo = 10;
+  // Timestamp limite para prioridade do comando manual (override)
+  int64 overrideManualAte = 11;
+  // Lista de pacientes aguardando vaga na sala
+  repeated ItemFilaEsperaMessage filaEspera = 12;
+  // Data e hora da última sincronização no formato ISO
+  string ultimaAtualizacao = 13;
+  // Histórico de auditoria persistido no MongoDB
+  repeated RegistroHistoricoMessage historico = 14;
+}
+
+// Envelope retornado na consulta de status gRPC
+message EstadoSalaResponse {
+  // Identificador do controlador que respondeu à consulta
+  string controlador = 1;
+  // Porta gRPC em que o controlador está escutando
+  int32 porta = 2;
+  // Identificador da instância do MongoDB associada a este controlador
+  string armazenamentoId = 3;
+  // Indicador de integridade do nó (ex: HONESTO ou FALHA_BIZANTINA)
+  string integridade = 4;
+  // Dados do estado da sala persistidos no banco
+  EstadoSalaData estado = 5;
+}
+
+// Envelope retornado após a execução bem-sucedida de um método gRPC
+message SucessoResponse {
+  // Confirmação de execução bem-sucedida
+  bool sucesso = 1;
+  // Nome do método que foi executado
+  string metodoInvocado = 2;
+  // Identificador do controlador que processou a requisição
+  string processadoPor = 3;
+  // Porta do controlador que processou a requisição
+  int32 porta = 4;
+  // Mensagem descritiva do resultado da execução
+  string mensagem = 5;
+  // Estado atualizado da sala após a execução do método
+  EstadoSalaData estado = 6;
+}
+
+// Requisição de votação enviada pelo Líder aos demais controladores
+message VotoRequest {
+  // Identificador do controlador líder (ex: "controlador-1")
+  string liderId = 1;
+  // Tipo do evento acionador (ex: "TELEMETRIA_RUIDO", "METODO_MANUAL", "FILA")
+  string tipoEvento = 2;
+  // Estado candidato gerado pelo Líder a ser submetido ao Quorum
+  EstadoSalaData estadoCandidato = 3;
+}
+
+// Resposta contendo o voto do controlador da réplica
+message VotoResponse {
+  // Identificador do controlador que emitiu o voto
+  string controlador = 1;
+  // Porta gRPC do controlador que respondeu
+  int32 porta = 2;
+  // Booleano indicando concordância com a proposta do líder
+  bool aprova = 3;
+  // Estado calculado pelo nó a partir da telemetria MQTT ou de sua regra local
+  EstadoSalaData estadoVotado = 4;
+  // Justificativa ou log de auditoria da votação
+  string justificativa = 5;
+}
+
+// Requisição enviada pelo Líder para efetivar o estado validado no banco de cada réplica
+message EstadoSalaRequest {
+  // Identificador do controlador líder
+  string liderId = 1;
+  // Categoria de auditoria do evento
+  string tipo = 2;
+  // Descrição do evento de auditoria
+  string descricao = 3;
+  // Estado validado pelo Quorum para ser persistido
+  EstadoSalaData estadoValidado = 4;
+}
+
+// Serviço gRPC do Middleware Clínico Distribuído (acesso externo de clientes)
+service MiddlewareClinico {
+  // Obtém o estado mais recente da réplica no MongoDB
+  rpc ObterStatus (Empty) returns (EstadoSalaResponse);
+  // Ativa manualmente o Protocolo de Regulação Sensorial
+  rpc AtivarModoCalmaManual (OrigemRequest) returns (SucessoResponse);
+  // Invoca métodos remotos com parâmetros customizados
+  rpc InvocarMetodo (InvocarMetodoRequest) returns (SucessoResponse);
+  // Alterna o estado de simulação de falha bizantina no Controlador 3
+  rpc ToggleBizantino (Empty) returns (SucessoResponse);
+}
+
+// Serviço gRPC interno para consenso (Quorum 2x1) entre os controladores do Middleware
+service ConsensoInterno {
+  // Chamada pelo Líder para obter o voto da réplica sobre um estado candidato
+  rpc VotarEstado (VotoRequest) returns (VotoResponse);
+  // Chamada pelo Líder para gravar o estado aprovado no MongoDB da réplica
+  rpc EfetivarEstado (EstadoSalaRequest) returns (SucessoResponse);
+}

@@ -1,0 +1,33 @@
+{
+  "name": "trabalho-pratico-sd",
+  "version": "1.0.0",
+  "description": "Middleware IoT Distribuído para Clínica Pediátrica (Diverterapia) - Sistemas Distribuídos",
+  "main": "mqtt-broker/broker.ts",
+  "scripts": {
+    "broker": "npx tsx mqtt-broker/broker.ts",
+    "sensor:ruido": "npx tsx sensores/sensorRuido.ts",
+    "sensor:bpm": "npx tsx sensores/sensorBPM.ts",
+    "sensor:presenca": "npx tsx sensores/sensorPresenca.ts",
+    "atuador:speaker": "npx tsx atuadores/smartSpeaker.ts",
+    "atuador:luz": "npx tsx atuadores/iluminacao.ts",
+    "atuador:display": "npx tsx atuadores/displayPorta.ts",
+    "ctrl1": "npx tsx controladores/controlador1.ts",
+    "ctrl2": "npx tsx controladores/controlador2.ts",
+    "ctrl3": "npx tsx controladores/controlador3.ts",
+    "backend": "concurrently -k -p \"[{name}]\" -n \"BROKER,CTRL1,CTRL2,CTRL3,S-RUIDO,S-BPM,S-PRES,A-LUZ,A-SOM,A-DISP\" -c \"bgBlue.bold,bgCyan.bold,bgGreen.bold,bgMagenta.bold,yellow,yellow,yellow,magenta,magenta,magenta\" \"npm run broker\" \"npm run ctrl1\" \"npm run ctrl2\" \"npm run ctrl3\" \"npm run sensor:ruido\" \"npm run sensor:bpm\" \"npm run sensor:presenca\" \"npm run atuador:luz\" \"npm run atuador:speaker\" \"npm run atuador:display\"",
+    "start:all": "concurrently -k -p \"[{name}]\" -n \"BROKER,CTRL1,CTRL2,CTRL3,S-RUIDO,S-BPM,S-PRES,A-LUZ,A-SOM,A-DISP,NEXTJS\" -c \"bgBlue.bold,bgCyan.bold,bgGreen.bold,bgMagenta.bold,yellow,yellow,yellow,magenta,magenta,magenta,bgBlack.white\" \"npm run broker\" \"npm run ctrl1\" \"npm run ctrl2\" \"npm run ctrl3\" \"npm run sensor:ruido\" \"npm run sensor:bpm\" \"npm run sensor:presenca\" \"npm run atuador:luz\" \"npm run atuador:speaker\" \"npm run atuador:display\" \"npm --prefix cliente-dashboard run dev\""
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "^1.14.7",
+    "@grpc/proto-loader": "^0.7.15",
+    "aedes": "^0.51.3",
+    "mongoose": "^8.8.1",
+    "mqtt": "^5.10.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "concurrently": "^9.1.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

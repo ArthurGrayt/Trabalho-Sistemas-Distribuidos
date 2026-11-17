@@ -1,0 +1,59 @@
+/* Importa a camada base de normalização do Tailwind CSS */
+@tailwind base;
+/* Importa a camada de componentes do Tailwind CSS */
+@tailwind components;
+/* Importa a camada de classes utilitárias do Tailwind CSS */
+@tailwind utilities;
+
+/* Estilos de nível de documento para garantir uma base sóbria e refinada no tema escuro */
+@layer base {
+  /* Configuração do elemento raiz html e body para um tom escuro neutro de alta fidelidade */
+  body {
+    /* Fundo preto suave neutro (zinc-950) sem saturação excessiva */
+    background-color: #09090b;
+    /* Texto principal em cinza muito claro (zinc-100) com contraste ótimo */
+    color: #f4f4f5;
+    /* Suavização de fontes em browsers WebKit */
+    -webkit-font-smoothing: antialiased;
+    /* Suavização de fontes em browsers Firefox */
+    -moz-osx-font-smoothing: grayscale;
+    /* Impede rolagem horizontal desnecessária */
+    overflow-x: hidden;
+  }
+
+  /* Personalização discreta da seleção de texto */
+  ::selection {
+    /* Cor de fundo da seleção em azul ardósia sutil */
+    background-color: #27272a;
+    /* Cor do texto durante seleção */
+    color: #fafafa;
+  }
+
+  /* Barra de rolagem minimalista e elegante para ambientes de desktop */
+  ::-webkit-scrollbar {
+    /* Largura fina e discreta */
+    width: 5px;
+    /* Altura para eixos horizontais */
+    height: 5px;
+  }
+
+  /* Trilha de fundo da barra de rolagem */
+  ::-webkit-scrollbar-track {
+    /* Fundo escuro integrado à página */
+    background: #09090b;
+  }
+
+  /* Cursor da barra de rolagem */
+  ::-webkit-scrollbar-thumb {
+    /* Cor cinza chumbo neutro */
+    background: #27272a;
+    /* Borda sutil arredondada */
+    border-radius: 4px;
+  }
+
+  /* Hover no cursor da barra de rolagem */
+  ::-webkit-scrollbar-thumb:hover {
+    /* Fica ligeiramente mais claro ao passar o cursor */
+    background: #3f3f46;
+  }
+}
