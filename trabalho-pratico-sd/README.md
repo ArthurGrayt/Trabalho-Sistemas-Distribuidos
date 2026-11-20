@@ -2,6 +2,6 @@
 ## 📚 Relatório 
 
 
-👉 **[Relatório Técnico e Manual Arquitetural (docs/DOCUMENTACAO_TECNICA.md)](./docs/DOCUMENTACAO_TECNICA.pdf)**
+👉 **[Relatório Técnico e Manual Arquitetural (docs/DOCUMENTACAO_TECNICA.pdf)](./docs/DOCUMENTACAO_TECNICA.pdf)**
 
 
