@@ -87,6 +87,8 @@ message EstadoSalaResponse {
   string integridade = 4;
   // Dados do estado da sala persistidos no banco
   EstadoSalaData estado = 5;
+  // Indicador se o nó está com simulação de crash/parada ativa
+  bool falhaParadaSimulada = 6;
 }
 
 // Envelope retornado após a execução bem-sucedida de um método gRPC
@@ -105,6 +107,8 @@ message SucessoResponse {
   EstadoSalaData estado = 6;
   // Flag indicando se a simulação de falha bizantina está ativa no Controlador 3
   bool simularFalhaBizantina = 7;
+  // Flag indicando se a simulação de falha por parada (Crash Fault) está ativa
+  bool falhaParadaSimulada = 8;
 }
 
 // Requisição de votação enviada pelo Líder aos demais controladores
@@ -153,6 +157,8 @@ service MiddlewareClinico {
   rpc InvocarMetodo (InvocarMetodoRequest) returns (SucessoResponse);
   // Alterna o estado de simulação de falha bizantina no Controlador 3
   rpc ToggleBizantino (Empty) returns (SucessoResponse);
+  // Alterna o status operacional do nó simulando falha por parada (Crash Fault) ou recuperação
+  rpc AlternarStatusOperacional (Empty) returns (SucessoResponse);
 }
 
 // Serviço gRPC interno para consenso (Quorum 2x1) entre os controladores do Middleware

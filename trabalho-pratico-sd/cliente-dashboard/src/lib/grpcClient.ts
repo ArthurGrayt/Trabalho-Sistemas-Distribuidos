@@ -65,6 +65,8 @@ export interface DiagnosticoNoCluster {
   integridade: string;
   // Identificador da instância MongoDB associada ao nó
   armazenamentoId: string;
+  // Flag indicando se a falha por parada simulada (Crash Fault) está ativa
+  falhaParadaSimulada?: boolean;
   // Dados completos da resposta ObterStatus quando online (uso interno do Gateway)
   dados?: any;
 }
@@ -161,6 +163,30 @@ export function rpcToggleBizantino(timeoutMs = 1500): Promise<any> {
       if (err) {
         reject(err);
       } else {
+        resolve(response);
+      }
+    });
+  });
+}
+
+// Invoca o método remoto AlternarStatusOperacional em qualquer controlador para simular Crash ou Recovery
+export function rpcAlternarStatusOperacional(porta: number, timeoutMs = 1500): Promise<any> {
+  // Retorna Promise tipada para o Gateway da API
+  return new Promise((resolve, reject) => {
+    // Obtém stub gRPC do controlador correspondente
+    const client = getGrpcClient(porta);
+    // Cria metadados gRPC
+    const metadata = new grpc.Metadata();
+    // Define prazo de resposta
+    const deadline = new Date(Date.now() + timeoutMs);
+
+    // Dispara a chamada RPC AlternarStatusOperacional
+    client.AlternarStatusOperacional({}, metadata, { deadline }, (err: any, response: any) => {
+      // Rejeita em caso de erro
+      if (err) {
+        reject(err);
+      } else {
+        // Resolve com a resposta do nó
         resolve(response);
       }
     });

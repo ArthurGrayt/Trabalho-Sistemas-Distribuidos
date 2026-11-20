@@ -539,6 +539,123 @@ export default function DashboardPage() {
     }
   };
 
+  // Alterna o status operacional (Crash ou Recovery) de qualquer um dos 3 nós do cluster
+  const alternarStatusNo = async (no: StatusNoControlador) => {
+    // Bloco try/catch para captura de erros de rede
+    try {
+      // Extrai o identificador ordinal do nó a partir da porta (3001 -> 1, 3002 -> 2, 3003 -> 3)
+      const idOrdinal = no.porta === 3001 ? '1' : no.porta === 3002 ? '2' : '3';
+      // Registra no log a intenção da operação antes de disparar
+      registrarLog('INFO', `Enviando comando para alternar status operacional de ${no.nome}...`);
+      // Dispara a requisição HTTP POST para a rota do Gateway
+      const res = await fetchComTimeout(`/api/controlador/${idOrdinal}/toggle-crash`, { method: 'POST' }, 2500);
+      // Tenta obter o corpo JSON retornado pela API
+      const dados = await res.json().catch(() => ({}));
+      // Verifica se a resposta HTTP foi de erro crítico (diferente de 503)
+      if (!res.ok && res.status !== 503) {
+        // Lança erro caso a API tenha retornado status de falha
+        throw new Error(dados?.erro || `HTTP ${res.status}`);
+      }
+      // Verifica se o nó estava online antes do comando
+      const estavaOnline = no.online;
+      // Registra mensagem de auditoria no console com o evento correspondente
+      registrarLog(
+        estavaOnline ? 'FAILOVER' : 'INFO',
+        estavaOnline
+          ? `💀 [FALHA DE PARADA / CRASH] ${no.nome} foi derrubado! Observe a reação do cluster.`
+          : `⚡ [RECUPERAÇÃO / RECOVERY] ${no.nome} foi revivido e sincronizado com o cluster!`
+      );
+      // Força nova consulta imediata do estado de consenso e diagnóstico de todos os nós
+      await consultarQuorumControladores();
+    } catch (err: any) {
+      // Registra alerta no log caso haja falha inesperada na chamada
+      registrarLog('ALERTA', `Erro ao alternar status de ${no.nome}: ${err?.message || 'Falha de comunicação'}`);
+    }
+  };
+
+  // Dispara a configuração padrão do Cenário 1: Operação Normal com Quorum 2x1 ativo
+  const dispararCenario1 = async () => {
+    // Localiza os diagnósticos atuais dos nós 1 e 2
+    const no1 = nosControladores.find((n) => n.porta === 3001);
+    // Localiza o nó 2
+    const no2 = nosControladores.find((n) => n.porta === 3002);
+    // Se o Controlador 1 estiver offline, reativa-o
+    if (no1 && !no1.online) {
+      // Envia comando para reviver C1
+      await fetchComTimeout('/api/controlador/1/toggle-crash', { method: 'POST' }, 2500);
+    }
+    // Se o Controlador 2 estiver offline, reativa-o
+    if (no2 && !no2.online) {
+      // Envia comando para reviver C2
+      await fetchComTimeout('/api/controlador/2/toggle-crash', { method: 'POST' }, 2500);
+    }
+    // Registra no console de auditoria
+    registrarLog('INFO', '🟢 [CENÁRIO 1] Operação Normal restaurada: C1 Líder ativo, C2 Réplica Honesta e Quorum 2x1 funcionando.');
+    // Atualiza o estado visual do cluster
+    await consultarQuorumControladores();
+  };
+
+  // Dispara o Cenário 2: Queda do Líder C1 e promoção automática de C2 como Líder Interino
+  const dispararCenario2 = async () => {
+    // Localiza o diagnóstico do Nó 1
+    const no1 = nosControladores.find((n) => n.porta === 3001);
+    // Se o Controlador 1 estiver online, derruba-o para disparar a eleição/failover
+    if (no1 && no1.online) {
+      // Envia requisição para derrubar o Controlador 1
+      await fetchComTimeout('/api/controlador/1/toggle-crash', { method: 'POST' }, 2500);
+      // Registra o evento de failover no log
+      registrarLog('FAILOVER', '👑 [CENÁRIO 2] Queda do Líder C1 simulada! C2 detectará heartbeat em 1.5s e assumirá como Líder Interino.');
+    } else {
+      // Alerta que C1 já estava caído
+      registrarLog('FAILOVER', '👑 [CENÁRIO 2] C1 já se encontra offline. Controlador 2 já opera como Líder Interino.');
+    }
+    // Atualiza a telemetria do cluster
+    await consultarQuorumControladores();
+  };
+
+  // Dispara o Cenário 3: Recuperação de C1 com Catch-up automático junto a C2 e devolução pacífica
+  const dispararCenario3 = async () => {
+    // Localiza o diagnóstico do Nó 1
+    const no1 = nosControladores.find((n) => n.porta === 3001);
+    // Se o Controlador 1 estiver offline, revigora o processo disparando o catch-up
+    if (no1 && !no1.online) {
+      // Envia requisição para reviver o Controlador 1
+      await fetchComTimeout('/api/controlador/1/toggle-crash', { method: 'POST' }, 2500);
+      // Registra no log de auditoria
+      registrarLog('INFO', '🔄 [CENÁRIO 3] C1 revivido! Catch-up automático disparado com C2; liderança íntegra reassumida.');
+    } else {
+      // Informa que C1 já está operando
+      registrarLog('INFO', '🔄 [CENÁRIO 3] C1 já está online e operando em modo íntegro.');
+    }
+    // Atualiza a visão do cluster
+    await consultarQuorumControladores();
+  };
+
+  // Identifica dinamicamente qual dos 3 cenários distribuídos está em vigor neste instante
+  const cenarioAtivo = useMemo(() => {
+    // Obtém o nó 1
+    const no1 = nosControladores.find((n) => n.porta === 3001);
+    // Obtém o nó 2
+    const no2 = nosControladores.find((n) => n.porta === 3002);
+    // Caso C1 esteja fora e C2 online, estamos no Cenário 2 (Failover / Líder Interino)
+    if (no1 && !no1.online && no2 && no2.online) {
+      // Retorna 2 para indicar Cenário 2
+      return 2;
+    }
+    // Caso C1 e C2 estejam online, o cluster está no Cenário 1 (Operação Normal)
+    if (no1 && no1.online && no2 && no2.online) {
+      // Retorna 1 para indicar Cenário 1
+      return 1;
+    }
+    // Caso C1 esteja online mas C2 fora, ou retorno recente de C1
+    if (no1 && no1.online) {
+      // Retorna 3 para indicar Cenário 3 / Recuperação
+      return 3;
+    }
+    // Caso ambos estejam fora
+    return 0;
+  }, [nosControladores]);
+
   // Formata timestamps ISO retornados pelo MongoDB para HH:MM:SS em pt-BR com fallback seguro
   const formatarHorarioRegistro = (horarioIso: string): string => {
     // Tenta converter a string ISO recebida para timestamp numérico
@@ -667,6 +784,157 @@ export default function DashboardPage() {
             <span className="text-[11px] font-mono px-2.5 py-0.5 rounded-md border border-white/10 bg-black/25">
               {nosOnlineCount}/3 nós gRPC online
             </span>
+          </div>
+        </div>
+
+        {/* Painel Interativo de Demonstração dos 3 Cenários de Sistemas Distribuídos */}
+        <div className="rounded-xl border border-zinc-800/80 bg-zinc-900/40 p-4 space-y-3">
+          {/* Cabeçalho do Painel com Título Didático e Badge do Cenário Ativo */}
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border-b border-zinc-800/60 pb-3">
+            {/* Bloco de Título */}
+            <div>
+              {/* Título Principal */}
+              <h2 className="text-xs font-semibold text-zinc-100 uppercase tracking-wider flex items-center gap-2">
+                {/* Ícone de capelo acadêmico */}
+                <span>🎓 Cenários de Sistemas Distribuídos</span>
+                {/* Badge dinâmica do Cenário em Tempo Real */}
+                <span className={`text-[10px] px-2 py-0.5 rounded-full font-mono font-medium ${
+                  cenarioAtivo === 1
+                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                    : cenarioAtivo === 2
+                    ? 'bg-blue-500/20 text-blue-300 border border-blue-500/30 animate-pulse'
+                    : cenarioAtivo === 3
+                    ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30'
+                    : 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                }`}>
+                  {cenarioAtivo === 1
+                    ? 'Cenário 1 Ativo (Normal)'
+                    : cenarioAtivo === 2
+                    ? 'Cenário 2 Ativo (Failover C1 ➜ C2)'
+                    : cenarioAtivo === 3
+                    ? 'Cenário 3 Ativo (Catch-up / Recuperado)'
+                    : 'Cluster Degradado'}
+                </span>
+              </h2>
+              {/* Subtítulo explicativo */}
+              <p className="text-[11px] text-zinc-400 mt-0.5">
+                Alterne falhas por parada (Crash), eleição/failover por heartbeat e catch-up entre os controladores em 1 clique.
+              </p>
+            </div>
+            {/* Identificação do Líder em tempo real */}
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] font-mono text-zinc-400">
+                Líder Atual: <strong className="text-zinc-200">{!nosControladores.find(n => n.porta === 3001)?.online ? 'Controlador 2 (Interino 👑)' : 'Controlador 1'}</strong>
+              </span>
+            </div>
+          </div>
+
+          {/* Grid dos 3 Cenários Distribuídos */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            {/* Card Cenário 1: Operação Normal & Quorum 2x1 */}
+            <div className={`p-3.5 rounded-lg border transition-all flex flex-col justify-between gap-3 ${
+              cenarioAtivo === 1
+                ? 'border-emerald-500/50 bg-emerald-950/20 shadow-sm ring-1 ring-emerald-500/20'
+                : 'border-zinc-800/80 bg-zinc-900/50 opacity-80 hover:opacity-100'
+            }`}>
+              {/* Informações técnicas do cenário 1 */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  {/* Nome do Cenário 1 */}
+                  <span className="text-xs font-semibold text-zinc-200">1. Operação Normal</span>
+                  {/* Etiqueta de status */}
+                  <span className={`text-[9px] px-1.5 py-0.5 rounded font-mono ${
+                    cenarioAtivo === 1 ? 'bg-emerald-500/20 text-emerald-300' : 'bg-zinc-800 text-zinc-400'
+                  }`}>
+                    {cenarioAtivo === 1 ? '● EM EXECUÇÃO' : 'Quorum 2x1'}
+                  </span>
+                </div>
+                {/* Descrição acadêmica do Cenário 1 */}
+                <p className="text-[11px] text-zinc-400 leading-relaxed">
+                  C1 atua como Líder Primário, C2 como Réplica Honesta e C3 é avaliado por Quorum 2x1 (descartando adulterações bizantinas).
+                </p>
+              </div>
+              {/* Botão de disparo do Cenário 1 */}
+              <button
+                type="button"
+                onClick={dispararCenario1}
+                className="w-full py-1.5 px-3 rounded text-[11px] font-medium border border-zinc-700 bg-zinc-800/80 text-zinc-200 hover:bg-zinc-700 hover:text-white transition"
+              >
+                Restaurar Cenário 1
+              </button>
+            </div>
+
+            {/* Card Cenário 2: Queda do Líder & Failover Automático */}
+            <div className={`p-3.5 rounded-lg border transition-all flex flex-col justify-between gap-3 ${
+              cenarioAtivo === 2
+                ? 'border-blue-500/50 bg-blue-950/20 shadow-sm ring-1 ring-blue-500/20'
+                : 'border-zinc-800/80 bg-zinc-900/50 opacity-80 hover:opacity-100'
+            }`}>
+              {/* Informações técnicas do cenário 2 */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  {/* Nome do Cenário 2 */}
+                  <span className="text-xs font-semibold text-zinc-200">2. Queda &amp; Failover</span>
+                  {/* Etiqueta de status */}
+                  <span className={`text-[9px] px-1.5 py-0.5 rounded font-mono ${
+                    cenarioAtivo === 2 ? 'bg-blue-500/20 text-blue-300' : 'bg-zinc-800 text-zinc-400'
+                  }`}>
+                    {cenarioAtivo === 2 ? '👑 LÍDER INTERINO' : 'Heartbeat 1.5s'}
+                  </span>
+                </div>
+                {/* Descrição acadêmica do Cenário 2 */}
+                <p className="text-[11px] text-zinc-400 leading-relaxed">
+                  Derruba C1. C2 detecta timeout de heartbeat em 1.5s, assume como Líder Interino (👑), grava no MongoDB 2 e comanda atuadores.
+                </p>
+              </div>
+              {/* Botão de disparo do Cenário 2 */}
+              <button
+                type="button"
+                onClick={dispararCenario2}
+                className="w-full py-1.5 px-3 rounded text-[11px] font-medium border border-rose-900/60 bg-rose-950/40 text-rose-300 hover:bg-rose-900/60 hover:text-white transition flex items-center justify-center gap-1.5"
+              >
+                {/* Ícone de caveira */}
+                <span>💀</span>
+                {/* Rótulo da ação */}
+                <span>Derrubar C1 (Disparar Failover)</span>
+              </button>
+            </div>
+
+            {/* Card Cenário 3: Recuperação & Sincronização Catch-up */}
+            <div className={`p-3.5 rounded-lg border transition-all flex flex-col justify-between gap-3 ${
+              cenarioAtivo === 3
+                ? 'border-purple-500/50 bg-purple-950/20 shadow-sm ring-1 ring-purple-500/20'
+                : 'border-zinc-800/80 bg-zinc-900/50 opacity-80 hover:opacity-100'
+            }`}>
+              {/* Informações técnicas do cenário 3 */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  {/* Nome do Cenário 3 */}
+                  <span className="text-xs font-semibold text-zinc-200">3. Recuperação &amp; Catch-up</span>
+                  {/* Etiqueta de status */}
+                  <span className={`text-[9px] px-1.5 py-0.5 rounded font-mono ${
+                    cenarioAtivo === 3 ? 'bg-purple-500/20 text-purple-300' : 'bg-zinc-800 text-zinc-400'
+                  }`}>
+                    {cenarioAtivo === 3 ? '🔄 SINCRONIZADO' : 'Zero Perda'}
+                  </span>
+                </div>
+                {/* Descrição acadêmica do Cenário 3 */}
+                <p className="text-[11px] text-zinc-400 leading-relaxed">
+                  Revive C1. C1 executa Catch-up com C2 absorvendo transações perdidas, C2 devolve a liderança pacificamente e o cluster se estabiliza.
+                </p>
+              </div>
+              {/* Botão de disparo do Cenário 3 */}
+              <button
+                type="button"
+                onClick={dispararCenario3}
+                className="w-full py-1.5 px-3 rounded text-[11px] font-medium border border-emerald-900/60 bg-emerald-950/40 text-emerald-300 hover:bg-emerald-900/60 hover:text-white transition flex items-center justify-center gap-1.5"
+              >
+                {/* Ícone de raio */}
+                <span>⚡</span>
+                {/* Rótulo da ação */}
+                <span>Reviver C1 (Executar Catch-up)</span>
+              </button>
+            </div>
           </div>
         </div>
 
@@ -1012,6 +1280,40 @@ export default function DashboardPage() {
                             </span>
                           </>
                         )}
+                      </div>
+
+                      {/* Botão de Controle Individual para Matar ou Reviver o Controlador (Crash / Recovery) */}
+                      <div className="flex items-center justify-between pt-2 border-t border-zinc-800/60 mt-1">
+                        {/* Indicador do estado operacional do processo */}
+                        <span className="text-[10px] text-zinc-500 font-mono">
+                          {no.online ? 'Em Execução' : 'Parada Simulada (Crash)'}
+                        </span>
+                        {/* Botão de alternância de status operacional */}
+                        <button
+                          type="button"
+                          onClick={() => alternarStatusNo(no)}
+                          className={`px-2.5 py-1 rounded text-[10px] font-semibold transition-all flex items-center gap-1.5 ${
+                            no.online
+                              ? 'border border-rose-900/60 bg-rose-950/40 text-rose-300 hover:bg-rose-900/60 hover:text-white hover:border-rose-700 shadow-sm'
+                              : 'border border-emerald-900/60 bg-emerald-950/40 text-emerald-300 hover:bg-emerald-900/60 hover:text-white hover:border-emerald-700 shadow-sm animate-pulse'
+                          }`}
+                        >
+                          {no.online ? (
+                            <>
+                              {/* Ícone de caveira indicando parada */}
+                              <span>💀</span>
+                              {/* Rótulo para derrubar o nó */}
+                              <span>Derrubar Nó</span>
+                            </>
+                          ) : (
+                            <>
+                              {/* Ícone de raio indicando recuperação */}
+                              <span>⚡</span>
+                              {/* Rótulo para reviver o nó */}
+                              <span>Reviver Nó</span>
+                            </>
+                          )}
+                        </button>
                       </div>
                     </div>
                   );

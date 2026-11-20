@@ -6,6 +6,7 @@ import {
   rpcAtivarModoCalmaManual,
   rpcInvocarMetodo,
   rpcToggleBizantino,
+  rpcAlternarStatusOperacional,
 } from '@/lib/grpcClient';
 
 // Configura esta rota para execução dinâmica sem cache
@@ -108,6 +109,14 @@ export async function POST(
       // Alterna a falha bizantina via RPC no nó 3
       const resultado = await rpcToggleBizantino(1500);
       // Retorna a resposta
+      return NextResponse.json(resultado, { status: 200 });
+    }
+
+    // Se a ação for 'toggle-crash' ou 'alternar-status' para simular parada/recuperação do nó
+    if (acao === 'toggle-crash' || acao === 'alternar-status') {
+      // Invoca a RPC AlternarStatusOperacional no controlador na porta correspondente
+      const resultado = await rpcAlternarStatusOperacional(porta, 2500);
+      // Retorna a resposta com status 200
       return NextResponse.json(resultado, { status: 200 });
     }
 

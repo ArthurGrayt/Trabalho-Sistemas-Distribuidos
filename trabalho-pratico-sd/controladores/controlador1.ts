@@ -58,6 +58,8 @@ const diverterapiaProto = (grpc.loadPackageDefinition(packageDefinition) as any)
 
 // Inicializa o estado em memória espelhado com o documento do MongoDB 1
 let estadoLocal: EstadoSala = criarEstadoInicial();
+// Flag que controla a simulação de falha por parada (Crash Fault) acionada via Dashboard
+let falhaParadaSimulada = false;
 
 // Instancia o gerenciador unificado de persistência para a instância MongoDB 1
 const persistenciaMongo = criarGerenciadorMongo({
@@ -489,6 +491,11 @@ function iniciarMqtt(): void {
 
   // Processa mensagens MQTT na fila sequencial aplicando Quorum 2x1 antes de gravar no MongoDB
   client.on('message', (topic, message) => {
+    // Verifica se o controlador está com simulação de parada (Crash Fault) ativa
+    if (falhaParadaSimulada) {
+      // Ignora silenciosamente qualquer mensagem enquanto o processo simular falha
+      return;
+    }
     // Enfileira o processamento para garantir que pacotes consecutivos nunca disputem estadoLocal
     enfileirarOperacao(async () => {
       try {
@@ -523,6 +530,16 @@ const grpcServer = new grpc.Server();
 grpcServer.addService(diverterapiaProto.MiddlewareClinico.service, {
   // Handler RPC ObterStatus
   ObterStatus: async (_call: any, callback: any) => {
+    // Interrompe imediatamente se o nó estiver com falha por parada (Crash) simulada
+    if (falhaParadaSimulada) {
+      // Retorna código UNAVAILABLE simulando a indisponibilidade total do processo
+      callback({
+        code: grpc.status.UNAVAILABLE,
+        message: 'Controlador 1 offline (Simulação de Falha por Parada / Crash).',
+      });
+      // Encerra a execução do handler
+      return;
+    }
     try {
       const status = await objetoControlador.obterStatus();
       callback(null, {
@@ -531,6 +548,7 @@ grpcServer.addService(diverterapiaProto.MiddlewareClinico.service, {
         armazenamentoId: status.armazenamentoId,
         integridade: status.integridade,
         estado: sanitizarEstadoParaGrpc(status.estado),
+        falhaParadaSimulada,
       });
     } catch (err: any) {
       callback({
@@ -542,6 +560,16 @@ grpcServer.addService(diverterapiaProto.MiddlewareClinico.service, {
 
   // Handler RPC AtivarModoCalmaManual
   AtivarModoCalmaManual: async (call: any, callback: any) => {
+    // Rejeita a requisição se o controlador estiver simulando queda
+    if (falhaParadaSimulada) {
+      // Devolve UNAVAILABLE para simular nó fora do ar
+      callback({
+        code: grpc.status.UNAVAILABLE,
+        message: 'Controlador 1 offline (Simulação de Falha por Parada / Crash).',
+      });
+      // Interrompe execução
+      return;
+    }
     try {
       const origem = call.request?.origem || 'Dashboard Cliente';
       const resultado = await objetoControlador.ativarModoCalmaManual(origem);
@@ -553,6 +581,7 @@ grpcServer.addService(diverterapiaProto.MiddlewareClinico.service, {
         mensagem: resultado.mensagem,
         estado: sanitizarEstadoParaGrpc(resultado.estado),
         simularFalhaBizantina: resultado.simularFalhaBizantina,
+        falhaParadaSimulada,
       });
     } catch (err: any) {
       callback({
@@ -564,6 +593,16 @@ grpcServer.addService(diverterapiaProto.MiddlewareClinico.service, {
 
   // Handler RPC InvocarMetodo
   InvocarMetodo: async (call: any, callback: any) => {
+    // Rejeita a chamada se o nó estiver derrubado
+    if (falhaParadaSimulada) {
+      // Devolve status UNAVAILABLE
+      callback({
+        code: grpc.status.UNAVAILABLE,
+        message: 'Controlador 1 offline (Simulação de Falha por Parada / Crash).',
+      });
+      // Retorna precocemente
+      return;
+    }
     try {
       const { metodo, origem, parametros } = call.request;
       const clienteOrigem = origem || 'Dashboard Cliente';
@@ -577,6 +616,7 @@ grpcServer.addService(diverterapiaProto.MiddlewareClinico.service, {
           mensagem: resultado.mensagem,
           estado: sanitizarEstadoParaGrpc(resultado.estado),
           simularFalhaBizantina: resultado.simularFalhaBizantina,
+          falhaParadaSimulada,
         });
       } else {
         const resultado = await objetoControlador.ativarModoCalmaManual(clienteOrigem);
@@ -588,6 +628,7 @@ grpcServer.addService(diverterapiaProto.MiddlewareClinico.service, {
           mensagem: resultado.mensagem,
           estado: sanitizarEstadoParaGrpc(resultado.estado),
           simularFalhaBizantina: resultado.simularFalhaBizantina,
+          falhaParadaSimulada,
         });
       }
     } catch (err: any) {
@@ -600,6 +641,16 @@ grpcServer.addService(diverterapiaProto.MiddlewareClinico.service, {
 
   // Handler RPC ToggleBizantino (Líder permanece sempre íntegro)
   ToggleBizantino: async (_call: any, callback: any) => {
+    // Rejeita se o nó estiver offline
+    if (falhaParadaSimulada) {
+      // Devolve UNAVAILABLE
+      callback({
+        code: grpc.status.UNAVAILABLE,
+        message: 'Controlador 1 offline (Simulação de Falha por Parada / Crash).',
+      });
+      // Retorna
+      return;
+    }
     callback(null, {
       sucesso: true,
       metodoInvocado: 'ToggleBizantino()',
@@ -608,6 +659,38 @@ grpcServer.addService(diverterapiaProto.MiddlewareClinico.service, {
       mensagem: 'Controlador 1 é o Líder e opera sempre com integridade garantida.',
       estado: sanitizarEstadoParaGrpc(estadoLocal),
       simularFalhaBizantina: false,
+      falhaParadaSimulada,
+    });
+  },
+
+  // Handler RPC AlternarStatusOperacional (Derrubar ou Reviver o nó simulando Crash e Recovery)
+  AlternarStatusOperacional: async (_call: any, callback: any) => {
+    // Inverte a flag booleana de simulação de parada
+    falhaParadaSimulada = !falhaParadaSimulada;
+    // Se o controlador foi revivido, dispara catch-up com o Controlador 2 para recuperar eventos perdidos
+    if (!falhaParadaSimulada) {
+      // Registra a recuperação no console do servidor
+      console.log(`[${CONTROLLER_ID}] 🔄 Controlador 1 revivido! Disparando Catch-up com C2...`);
+      // Executa a rotina de catch-up com o Controlador 2
+      await sincronizarCatchUpComReplica2();
+      // Registra que a sincronização foi concluída e o nó reassumiu
+      console.log(`[${CONTROLLER_ID}] ✅ Catch-up concluído com sucesso. Liderança íntegra restabelecida.`);
+    } else {
+      // Registra a simulação de queda no console do servidor
+      console.log(`[${CONTROLLER_ID}] 💀 Controlador 1 derrubado! Simulação de Crash ativada.`);
+    }
+    // Retorna resposta RPC com o novo status operacional
+    callback(null, {
+      sucesso: true,
+      metodoInvocado: 'AlternarStatusOperacional()',
+      processadoPor: CONTROLLER_ID,
+      porta: GRPC_PORT,
+      mensagem: falhaParadaSimulada
+        ? 'Controlador 1 derrubado (Falha de Parada / Crash ativa).'
+        : 'Controlador 1 recuperado e sincronizado via Catch-up!',
+      estado: sanitizarEstadoParaGrpc(estadoLocal),
+      simularFalhaBizantina: false,
+      falhaParadaSimulada,
     });
   },
 });
@@ -616,6 +699,16 @@ grpcServer.addService(diverterapiaProto.MiddlewareClinico.service, {
 grpcServer.addService(diverterapiaProto.ConsensoInterno.service, {
   // Retorna o voto próprio do Líder caso consultado
   VotarEstado: async (_call: any, callback: any) => {
+    // Se estiver derrubado, não vota
+    if (falhaParadaSimulada) {
+      // Retorna erro gRPC
+      callback({
+        code: grpc.status.UNAVAILABLE,
+        message: 'Controlador 1 offline (Simulação de Crash).',
+      });
+      // Encerra
+      return;
+    }
     callback(null, {
       controlador: CONTROLLER_ID,
       porta: GRPC_PORT,
@@ -627,6 +720,16 @@ grpcServer.addService(diverterapiaProto.ConsensoInterno.service, {
 
   // Efetivação interna caso solicitada
   EfetivarEstado: async (call: any, callback: any) => {
+    // Se estiver derrubado, não efetiva
+    if (falhaParadaSimulada) {
+      // Retorna erro gRPC
+      callback({
+        code: grpc.status.UNAVAILABLE,
+        message: 'Controlador 1 offline (Simulação de Crash).',
+      });
+      // Encerra
+      return;
+    }
     try {
       const { estadoValidado } = call.request;
       if (estadoValidado) {
@@ -643,6 +746,7 @@ grpcServer.addService(diverterapiaProto.ConsensoInterno.service, {
         mensagem: gravouBanco ? 'Efetivado no MongoDB 1 do Líder' : 'Efetivado em RAM no Líder (MongoDB 1 offline)',
         estado: sanitizarEstadoParaGrpc(estadoLocal),
         simularFalhaBizantina: false,
+        falhaParadaSimulada,
       });
     } catch (err: any) {
       callback({ code: grpc.status.INTERNAL, message: err?.message || 'Erro ao efetivar no Líder' });
