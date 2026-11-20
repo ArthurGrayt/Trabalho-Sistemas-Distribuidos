@@ -1,321 +1,289 @@
-// Importa o módulo gRPC nativo para comunicação de alto desempenho via chamadas RPC
+// Importa o módulo gRPC nativo para expor procedimentos remotos
 import * as grpc from '@grpc/grpc-js';
-// Importa o proto-loader para carregar dinamicamente o arquivo de definição de serviço Protobuf
+// Importa o proto-loader para carregar o contrato Protobuf compartilhado
 import * as protoLoader from '@grpc/proto-loader';
-// Importa o módulo nativo 'path' para resolver o caminho absoluto do arquivo .proto
+// Importa o módulo nativo 'path' para localizar o arquivo .proto
 import path from 'path';
-// Importa a biblioteca 'mqtt' para conectar o controlador ao barramento Publish/Subscribe
+// Importa a biblioteca 'mqtt' para receber telemetria e acionar atuadores em contingência extrema
 import mqtt from 'mqtt';
-// Importa o 'mongoose' para modelagem e persistência de dados na instância MongoDB 3
-import mongoose, { Schema, Document } from 'mongoose';
+// Importa as regras clínicas compartilhadas e utilitários determinísticos de consenso
+import {
+  EstadoSala,
+  aplicarConfigurarAtuadores,
+  aplicarEventoMqtt,
+  aplicarModoCalmaManual,
+  clonarEstado,
+  criarEstadoInicial,
+  normalizarEstadoRecebido,
+  publicarComandosAtuadores,
+  sanitizarEstadoParaGrpc,
+} from './regrasClinicas';
+// Importa o módulo unificado de persistência, reconexão automática e comparação de catch-up do MongoDB
+import {
+  criarGerenciadorMongo,
+  deveAbsorverEstadoRemoto,
+} from './persistenciaMongo';
 
-// Define a porta gRPC exclusiva do Controlador de Processo 3 (3003) - Réplica Bizantina
-const GRPC_PORT = 3003;
+// Define a porta gRPC do Controlador 1 (Líder) para catch-up configurável via env
+const GRPC_PORT_1 = Number(process.env.GRPC_PORT_1 || 3001);
+// Define a porta gRPC do Controlador 2 (Réplica Honesta) para fallback de catch-up configurável via env
+const GRPC_PORT_2 = Number(process.env.GRPC_PORT_2 || 3002);
+// Define a porta gRPC exclusiva do Controlador 3 (Réplica Bizantina Toggleável)
+const GRPC_PORT = Number(process.env.GRPC_PORT_3 || 3003);
 // Define o identificador único deste Controlador de Processo
 const CONTROLLER_ID = 'controlador-3';
-// Define a URL do Broker MQTT local na porta 1883
+// Define a URL do Broker MQTT Eclipse Mosquitto
 const BROKER_URL = 'mqtt://127.0.0.1:1883';
-// Define a URI de conexão exclusiva com a instância MongoDB 3 na porta 27019
-const MONGO_URI = 'mongodb://127.0.0.1:27019/diverterapia';
-// Define a chave única do documento da Sala 1 na coleção do MongoDB
-const SALA_DOC_ID = 'sala-1';
 
-// Flag que controla a simulação de Falha Bizantina (inicia ativa como padrão de teste)
+// Flag que controla a simulação de Falha Bizantina (inicia ativa por padrão para demonstração)
 let simularFalhaBizantina = true;
 
-// Resolve o caminho absoluto do contrato Protobuf compartilhado
+// Resolve o caminho absoluto do contrato Protobuf único na raiz do projeto
 const PROTO_PATH = path.resolve(__dirname, '../proto/diverterapia.proto');
 
-// Carrega a definição do contrato .proto utilizando o proto-loader com opções tipadas
+// Carrega as definições do arquivo .proto com opções tipadas
 const packageDefinition = protoLoader.loadSync(PROTO_PATH, {
+  // Mantém nomes em camelCase conforme o .proto
   keepCase: true,
+  // Converte int64 para strings no transporte gRPC
   longs: String,
+  // Trata enums como strings
   enums: String,
+  // Garante preenchimento de defaults
   defaults: true,
+  // Habilita suporte a campos oneof
   oneofs: true,
 });
 
-// Extrai o pacote 'diverterapia' a partir da definição carregada do gRPC
+// Extrai o pacote 'diverterapia' do descritor Protobuf
 const diverterapiaProto = (grpc.loadPackageDefinition(packageDefinition) as any).diverterapia;
 
-// Interface que representa um registro histórico persistido no documento do MongoDB
-interface RegistroHistorico {
-  horario: string;
-  tipo: string;
-  descricao: string;
-}
+// Armazena o estado oficialmente validado pelo Quorum e persistido no MongoDB 3
+let estadoConfirmado: EstadoSala = criarEstadoInicial();
+// Armazena o estado calculado independentemente via MQTT para emissão de voto quando em Modo Honesto
+let estadoTelemetria: EstadoSala = criarEstadoInicial();
 
-// Interface para um item na Fila de Espera Distribuída de pacientes
-interface ItemFilaEspera {
-  nome: string;
-  musica: string;
-  cor: string;
-  horario: string;
-}
-
-// Interface que modela o Objeto Distribuído da Sala 1 gerenciado pelo Middleware
-interface EstadoSala {
-  ruidoDb: number;
-  bpm: number;
-  presenca: boolean;
-  tagId: string;
-  musicaFavorita: string;
-  corFavorita: string;
-  iluminacao: string;
-  smartSpeaker: string;
-  displayPorta: string;
-  modoCalmaAtivo: boolean;
-  overrideManualAte: number;
-  filaEspera: ItemFilaEspera[];
-  ultimaAtualizacao: string;
-  historico: RegistroHistorico[];
-}
-
-// Interface do documento Mongoose combinando EstadoSala e Document
-interface EstadoSalaDocument extends EstadoSala, Document {
-  salaId: string;
-}
-
-// Sub-schema do Mongoose para os itens da fila de espera
-const ItemFilaSchema = new Schema<ItemFilaEspera>(
-  {
-    nome: { type: String, required: true },
-    musica: { type: String, required: true },
-    cor: { type: String, required: true },
-    horario: { type: String, required: true },
+// Instancia o gerenciador unificado de persistência para a instância MongoDB 3
+const persistenciaMongo = criarGerenciadorMongo({
+  // Identifica o controlador nos logs e na trilha de inicialização
+  controllerId: CONTROLLER_ID,
+  // Vincula à instância ordinal 3 do MongoDB
+  numeroInstancia: 3,
+  // Permite sobrescrever a URI via variável de ambiente MONGO_URI_3
+  nomeVarEnv: 'MONGO_URI_3',
+  // Define a URI local padrão do Docker Compose para o Controlador 3
+  uriPadrao: 'mongodb://127.0.0.1:27019/diverterapia',
+  // Fornece acesso ao estado confirmado em memória para sincronização pós-reconexão
+  obterEstadoAtual: () => estadoConfirmado,
+  // Atualiza estadoConfirmado e estadoTelemetria quando o crash-recovery ou reconexão recuperar dados do banco
+  aplicarEstadoRecuperado: (estadoRecuperado) => {
+    // Atualiza o estado confirmado com o snapshot recuperado do MongoDB 3
+    estadoConfirmado = estadoRecuperado;
+    // Mantém o buffer de telemetria espelhado para votação honesta coerente
+    estadoTelemetria = clonarEstado(estadoRecuperado);
   },
-  { _id: false }
-);
+});
 
-// Sub-schema do Mongoose para os registros de auditoria histórica
-const RegistroHistoricoSchema = new Schema<RegistroHistorico>(
-  {
-    horario: { type: String, required: true },
-    tipo: { type: String, required: true },
-    descricao: { type: String, required: true },
-  },
-  { _id: false }
-);
+// Função auxiliar para aguardar milissegundos em sincronizações assíncronas
+function esperarMs(ms: number): Promise<void> {
+  // Retorna uma Promise resolvida após o timeout
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
-// Schema principal do Mongoose associado à coleção 'estados_sala' na instância MongoDB 3
-const EstadoSalaSchema = new Schema<EstadoSalaDocument>(
-  {
-    salaId: { type: String, required: true, unique: true, default: SALA_DOC_ID },
-    ruidoDb: { type: Number, required: true, default: 62 },
-    bpm: { type: Number, required: true, default: 80 },
-    presenca: { type: Boolean, required: true, default: false },
-    tagId: { type: String, required: true, default: 'Nenhum paciente' },
-    musicaFavorita: { type: String, required: true, default: 'Aguardando paciente' },
-    corFavorita: { type: String, required: true, default: 'Branco' },
-    iluminacao: { type: String, required: true, default: 'Branca / Alto Contraste' },
-    smartSpeaker: { type: String, required: true, default: 'Aguardando paciente' },
-    displayPorta: { type: String, required: true, default: '> Sala 1 - Livre' },
-    modoCalmaAtivo: { type: Boolean, required: true, default: false },
-    overrideManualAte: { type: Number, required: true, default: 0 },
-    filaEspera: { type: [ItemFilaSchema], default: [] },
-    ultimaAtualizacao: { type: String, required: true, default: () => new Date().toISOString() },
-    historico: { type: [RegistroHistoricoSchema], default: [] },
-  },
-  { versionKey: false }
-);
-
-// Cria o Model Mongoose associado à coleção 'estados_sala' na instância MongoDB 3
-const EstadoSalaModel = mongoose.model<EstadoSalaDocument>('EstadoSala', EstadoSalaSchema, 'estados_sala');
-
-// Inicializa o estado em memória espelhado com o documento do MongoDB 3
-const estadoLocal: EstadoSala = {
-  ruidoDb: 62,
-  bpm: 80,
-  presenca: false,
-  tagId: 'Nenhum paciente',
-  musicaFavorita: 'Aguardando paciente',
-  corFavorita: 'Branco',
-  iluminacao: 'Branca / Alto Contraste',
-  smartSpeaker: 'Aguardando paciente',
-  displayPorta: '> Sala 1 - Livre',
-  modoCalmaAtivo: false,
-  overrideManualAte: 0,
-  filaEspera: [],
-  ultimaAtualizacao: new Date().toISOString(),
-  historico: [],
-};
-
-// Função assíncrona que persiste o estado atual na instância MongoDB 3
-async function salvarReplicaMongoDB(tipo: string, descricao: string): Promise<void> {
-  const novoRegistro: RegistroHistorico = {
-    horario: new Date().toISOString(),
-    tipo,
-    descricao,
+// Função auxiliar que gera o objeto com valores adulterados para simulação de Falha Bizantina
+function gerarEstadoAdulterado(base: EstadoSala): EstadoSala {
+  return {
+    ...clonarEstado(base),
+    // Ruído impossível para tentar forçar alarme falso
+    ruidoDb: 999,
+    // Batimento cardíaco impossível
+    bpm: 250,
+    // Inverte propositalmente o estado de presença
+    presenca: !base.presenca,
+    // Assinatura explícita de dado adulterado bizantino
+    tagId: 'DADO_ADULTERADO_BIZANTINO',
+    // Trilha falsa
+    musicaFavorita: 'sirene-descalibrada',
+    // Cor falsa
+    corFavorita: 'vermelho-bizantino',
+    // Estado falso de iluminação
+    iluminacao: 'Vermelho / Alerta Falso',
+    // Estado falso de áudio
+    smartSpeaker: 'Sirene Descalibrada',
+    // Mensagem falsa na porta
+    displayPorta: '> ERRO BIZANTINO / INVASÃO DETECTADA',
+    // Inverte flag do modo calma
+    modoCalmaAtivo: !base.modoCalmaAtivo,
   };
-  estadoLocal.historico = [novoRegistro, ...estadoLocal.historico.slice(0, 14)];
+}
 
-  if (mongoose.connection.readyState !== 1) {
+// Persiste estadoConfirmado no MongoDB 3 adicionando registro histórico somente se originado localmente
+async function salvarReplicaMongoDB(
+  tipo: string,
+  descricao: string,
+  adicionarHistorico: boolean = false
+): Promise<boolean> {
+  // Delega ao gerenciador compartilhado retornando true apenas quando gravou no banco
+  return persistenciaMongo.anexarHistoricoEPersistir(estadoConfirmado, tipo, descricao, adicionarHistorico);
+}
+
+// Consulta o status de um nó íntegro (C1 ou C2) usando canal isolado apenas durante o boot do Controlador 3
+function consultarStatusNoParaCatchUp(porta: number): Promise<any | null> {
+  // Retorna sempre uma Promise resolvida com os dados ou null em caso de falha/timeout
+  return new Promise((resolve) => {
+    // Instancia cliente temporário com subchannel pool local evitando canais ociosos pós-boot
+    const client = new diverterapiaProto.MiddlewareClinico(
+      `127.0.0.1:${porta}`,
+      grpc.credentials.createInsecure(),
+      { 'grpc.use_local_subchannel_pool': 1 }
+    );
+    // Define deadline curto de 600ms para não atrasar a inicialização
+    const deadline = new Date(Date.now() + 600);
+    // Invoca ObterStatus via gRPC no nó consultado
+    client.ObterStatus({}, new grpc.Metadata(), { deadline }, (err: any, response: any) => {
+      // Encerra o cliente temporário liberando os recursos do canal isolado
+      client.close();
+      // Descarta resposta caso haja erro, integridade bizantina ou ausência de estado
+      if (err || response?.integridade === 'FALHA_BIZANTINA' || !response?.estado?.ultimaAtualizacao) {
+        resolve(null);
+        return;
+      }
+      // Retorna a resposta válida obtida
+      resolve(response);
+    });
+  });
+}
+
+// Executa catch-up automático no boot consultando o Controlador 1 ou fallback no Controlador 2
+async function sincronizarCatchUpComLider(): Promise<void> {
+  // Tenta obter o estado oficial primeiramente no Líder 1
+  let origemNome = `Controlador 1 (:${GRPC_PORT_1})`;
+  let resposta = await consultarStatusNoParaCatchUp(GRPC_PORT_1);
+
+  // Se o Líder 1 estiver offline, faz fallback consultando o Controlador 2
+  if (!resposta) {
+    origemNome = `Controlador 2 (:${GRPC_PORT_2})`;
+    resposta = await consultarStatusNoParaCatchUp(GRPC_PORT_2);
+  }
+
+  // Se nenhum nó íntegro respondeu no boot simultâneo, encerra normalmente
+  if (!resposta?.estado) {
     return;
   }
 
-  try {
-    await EstadoSalaModel.findOneAndUpdate(
-      { salaId: SALA_DOC_ID },
-      { $set: { salaId: SALA_DOC_ID, ...estadoLocal } },
-      { upsert: true, new: true }
-    ).lean();
-  } catch (err) {
-    console.error(`[${CONTROLLER_ID}] Erro ao persistir no MongoDB 3 (${MONGO_URI}):`, err);
+  // Normaliza o estado remoto recebido garantindo tipos compatíveis
+  const estadoOrigem = normalizarEstadoRecebido(resposta.estado);
+  // Verifica se o estado remoto é mais recente ou possui eventos clínicos ausentes localmente
+  if (deveAbsorverEstadoRemoto(estadoConfirmado, estadoOrigem)) {
+    // Atualiza o estado confirmado local com o estado oficial do cluster
+    estadoConfirmado = estadoOrigem;
+    // Atualiza também o buffer de telemetria para manter congruência nos votos
+    estadoTelemetria = clonarEstado(estadoOrigem);
+    // Persiste o estado sincronizado no MongoDB 3 sem duplicar registros no histórico
+    const gravouBanco = await persistenciaMongo.persistirEstado(estadoConfirmado);
+    // Registra o catch-up no console informando a origem e se gravou em disco ou RAM
+    console.log(
+      `🔄 [${CONTROLLER_ID}] Catch-up concluído a partir de ${origemNome} — ${
+        gravouBanco ? 'salvo no MongoDB 3!' : 'mantido em RAM (MongoDB 3 offline).'
+      }`
+    );
   }
-}
-
-// Função assíncrona que lê o estado diretamente do MongoDB 3
-async function carregarEstadoDoMongoDB(): Promise<EstadoSala> {
-  if (mongoose.connection.readyState === 1) {
-    try {
-      const doc = await EstadoSalaModel.findOne({ salaId: SALA_DOC_ID }).lean();
-      if (doc) {
-        estadoLocal.ruidoDb = doc.ruidoDb;
-        estadoLocal.bpm = doc.bpm;
-        estadoLocal.presenca = doc.presenca;
-        estadoLocal.tagId = doc.tagId;
-        estadoLocal.musicaFavorita = doc.musicaFavorita;
-        estadoLocal.corFavorita = doc.corFavorita;
-        estadoLocal.iluminacao = doc.iluminacao;
-        estadoLocal.smartSpeaker = doc.smartSpeaker;
-        estadoLocal.displayPorta = doc.displayPorta;
-        estadoLocal.modoCalmaAtivo = doc.modoCalmaAtivo;
-        estadoLocal.overrideManualAte = doc.overrideManualAte;
-        estadoLocal.filaEspera = doc.filaEspera || [];
-        estadoLocal.ultimaAtualizacao = doc.ultimaAtualizacao;
-        estadoLocal.historico = doc.historico || [];
-      }
-    } catch (err) {
-      console.error(`[${CONTROLLER_ID}] Erro ao ler estado no MongoDB 3:`, err);
-    }
-  }
-  return estadoLocal;
-}
-
-// Inicializa a conexão com o MongoDB 3
-async function inicializarMongoDB(): Promise<void> {
-  try {
-    await mongoose.connect(MONGO_URI);
-    console.log(`[${CONTROLLER_ID}] Conectado com sucesso ao MongoDB 3 em ${MONGO_URI}`);
-    const docExistente = await EstadoSalaModel.findOne({ salaId: SALA_DOC_ID }).lean();
-    if (docExistente) {
-      await carregarEstadoDoMongoDB();
-      console.log(`[${CONTROLLER_ID}] Estado recuperado do MongoDB 3.`);
-    } else {
-      await salvarReplicaMongoDB('INICIALIZACAO', `${CONTROLLER_ID} inicializou o documento no MongoDB 3`);
-    }
-  } catch (err) {
-    console.error(`[${CONTROLLER_ID}] Erro ao conectar no MongoDB 3 (${MONGO_URI}):`, err);
-  }
-}
-
-// Função auxiliar de sanitização de dados para contrato gRPC
-function sanitizarEstadoParaGrpc(doc: any): any {
-  return {
-    ruidoDb: Math.round(Number(doc?.ruidoDb) || 62),
-    bpm: Math.round(Number(doc?.bpm) || 80),
-    presenca: Boolean(doc?.presenca),
-    tagId: String(doc?.tagId || 'Nenhum paciente'),
-    musicaFavorita: String(doc?.musicaFavorita || 'Aguardando paciente'),
-    corFavorita: String(doc?.corFavorita || 'Branco'),
-    iluminacao: String(doc?.iluminacao || 'Branca / Alto Contraste'),
-    smartSpeaker: String(doc?.smartSpeaker || 'Aguardando paciente'),
-    displayPorta: String(doc?.displayPorta || '> Sala 1 - Livre'),
-    modoCalmaAtivo: Boolean(doc?.modoCalmaAtivo),
-    overrideManualAte: Math.round(Number(doc?.overrideManualAte) || 0),
-    filaEspera: Array.isArray(doc?.filaEspera)
-      ? doc.filaEspera.map((item: any) => ({
-          nome: String(item?.nome || ''),
-          musica: String(item?.musica || ''),
-          cor: String(item?.cor || ''),
-          horario: String(item?.horario || ''),
-        }))
-      : [],
-    ultimaAtualizacao: String(doc?.ultimaAtualizacao || new Date().toISOString()),
-    historico: Array.isArray(doc?.historico)
-      ? doc.historico.map((h: any) => ({
-          horario: String(h?.horario || ''),
-          tipo: String(h?.tipo || ''),
-          descricao: String(h?.descricao || ''),
-        }))
-      : [],
-  };
 }
 
 // Classe que implementa o Objeto Distribuído da Réplica 3
 class ControladorProcessoSala3 {
+  // Retorna um snapshot seguro do estado em memória evitando sobrescrita fora da fila durante polling
   public async obterStatus() {
-    const estadoReal = await carregarEstadoDoMongoDB();
-    const estadoRetornado = simularFalhaBizantina
-      ? {
-          ruidoDb: 999,
-          bpm: 250,
-          presenca: !estadoReal.presenca,
-          tagId: 'DADO_ADULTERADO_BIZANTINO',
-          musicaFavorita: 'sirene-descalibrada',
-          corFavorita: 'vermelho-bizantino',
-          iluminacao: 'Vermelho / Alerta Falso',
-          smartSpeaker: 'Sirene Descalibrada',
-          displayPorta: '> ERRO BIZANTINO / INVASÃO DETECTADA',
-          modoCalmaAtivo: !estadoReal.modoCalmaAtivo,
-          overrideManualAte: estadoReal.overrideManualAte,
-          filaEspera: [{ nome: 'HACKED-USER', musica: 'Noise', cor: 'Preto', horario: '99:99' }],
-          ultimaAtualizacao: estadoReal.ultimaAtualizacao,
-          historico: estadoReal.historico,
-        }
-      : estadoReal;
+    // Clona o estado confirmado em memória sem sobrescrevê-lo durante leituras concorrentes
+    const estadoReal = clonarEstado(estadoConfirmado);
+    // Adultera apenas a cópia retornada se a simulação bizantina estiver ligada
+    const estadoRetornado = simularFalhaBizantina ? gerarEstadoAdulterado(estadoReal) : estadoReal;
 
     return {
       controlador: CONTROLLER_ID,
       porta: GRPC_PORT,
-      armazenamentoId: 'MongoDB 3 (mongodb://127.0.0.1:27019/diverterapia)',
+      armazenamentoId: persistenciaMongo.obterArmazenamentoId(),
       integridade: simularFalhaBizantina ? 'FALHA_BIZANTINA' : 'HONESTO',
       estado: estadoRetornado,
     };
   }
 
+  // Ativa modo calma caso C1 e C2 estejam offline (contingência extrema)
   public async ativarModoCalmaManual(origemCliente: string) {
-    estadoLocal.overrideManualAte = Date.now() + 15000;
-    estadoLocal.iluminacao = 'Azul / Calmante';
-    estadoLocal.smartSpeaker = 'Frequência Calmante (Ruído Branco)';
-    estadoLocal.displayPorta = '> Regulação em Curso (Não Entre)';
-    estadoLocal.modoCalmaAtivo = true;
-    estadoLocal.ultimaAtualizacao = new Date().toISOString();
-    await salvarReplicaMongoDB('INVOCACAO_METODO', `Modo Calma Manual (${origemCliente})`);
+    // Bloqueia mutação direta caso este nó esteja comprometido pela falha bizantina
+    if (simularFalhaBizantina) {
+      return {
+        sucesso: false,
+        metodoInvocado: 'ativarModoCalmaManual()',
+        processadoPor: CONTROLLER_ID,
+        porta: GRPC_PORT,
+        mensagem: 'Nó 3 está em modo FALHA_BIZANTINA e não pode executar comandos confiáveis.',
+        estado: estadoConfirmado,
+        simularFalhaBizantina: true,
+      };
+    }
+
+    // Executa normalmente se estiver operando em modo honesto
+    estadoConfirmado = aplicarModoCalmaManual(estadoConfirmado, origemCliente);
+    estadoTelemetria = clonarEstado(estadoConfirmado);
+    const gravouBanco = await salvarReplicaMongoDB('INVOCACAO_METODO', `Modo Calma Manual (${origemCliente})`, true);
+    // Publica aos atuadores somente se o cliente MQTT já estiver inicializado
+    if (mqttClient) {
+      publicarComandosAtuadores(mqttClient, estadoConfirmado, CONTROLLER_ID);
+    }
 
     return {
       sucesso: true,
       metodoInvocado: 'ativarModoCalmaManual()',
       processadoPor: CONTROLLER_ID,
       porta: GRPC_PORT,
-      armazenamentoAtualizado: 'MongoDB 3 (27019)',
-      mensagem: `Método executado e persistido no MongoDB 3 pelo ${CONTROLLER_ID}!`,
-      estado: estadoLocal,
+      mensagem: gravouBanco
+        ? `Método executado e persistido no MongoDB 3 pelo ${CONTROLLER_ID}!`
+        : `Método executado e mantido em RAM (MongoDB 3 offline) pelo ${CONTROLLER_ID}!`,
+      estado: estadoConfirmado,
+      simularFalhaBizantina: false,
     };
   }
 
-  public async configurarAtuadores(parametros: { corLuz?: string; somSpeaker?: string; textoDisplay?: string }) {
-    estadoLocal.overrideManualAte = Date.now() + 15000;
-    if (parametros.corLuz) {
-      estadoLocal.modoCalmaAtivo = parametros.corLuz.toLowerCase().includes('azul');
-      estadoLocal.iluminacao = parametros.corLuz;
+  // Configura atuadores caso C1 e C2 estejam offline (contingência extrema)
+  public async configurarAtuadores(
+    origemCliente: string,
+    parametros: { corLuz?: string; somSpeaker?: string; textoDisplay?: string }
+  ) {
+    if (simularFalhaBizantina) {
+      return {
+        sucesso: false,
+        metodoInvocado: 'configurarAtuadores()',
+        processadoPor: CONTROLLER_ID,
+        porta: GRPC_PORT,
+        mensagem: 'Nó 3 está em modo FALHA_BIZANTINA e recusou alteração insegura.',
+        estado: estadoConfirmado,
+        simularFalhaBizantina: true,
+      };
     }
-    if (parametros.somSpeaker) {
-      estadoLocal.smartSpeaker = parametros.somSpeaker;
+
+    estadoConfirmado = aplicarConfigurarAtuadores(estadoConfirmado, parametros);
+    estadoTelemetria = clonarEstado(estadoConfirmado);
+    const gravouBanco = await salvarReplicaMongoDB(
+      'INVOCACAO_METODO',
+      `Configuração de atuadores (${origemCliente}) via ${CONTROLLER_ID}`,
+      true
+    );
+    // Publica aos atuadores somente se o cliente MQTT já estiver inicializado
+    if (mqttClient) {
+      publicarComandosAtuadores(mqttClient, estadoConfirmado, CONTROLLER_ID);
     }
-    if (parametros.textoDisplay) {
-      estadoLocal.displayPorta = parametros.textoDisplay;
-    }
-    estadoLocal.ultimaAtualizacao = new Date().toISOString();
-    await salvarReplicaMongoDB('INVOCACAO_METODO', `Configuração de atuadores via ${CONTROLLER_ID}`);
 
     return {
       sucesso: true,
       metodoInvocado: 'configurarAtuadores()',
       processadoPor: CONTROLLER_ID,
       porta: GRPC_PORT,
-      mensagem: `Atuadores configurados e persistidos no MongoDB 3!`,
-      estado: estadoLocal,
+      mensagem: gravouBanco
+        ? `Atuadores configurados e persistidos no MongoDB 3!`
+        : `Atuadores configurados e mantidos em RAM (MongoDB 3 offline)!`,
+      estado: estadoConfirmado,
+      simularFalhaBizantina: false,
     };
   }
 }
@@ -323,61 +291,51 @@ class ControladorProcessoSala3 {
 // Instancia o objeto distribuído da Réplica 3
 const objetoControlador = new ControladorProcessoSala3();
 
-// Inicia conexão com o MongoDB 3
-inicializarMongoDB();
+// Referência ao cliente MQTT inicializado apenas após o recovery do MongoDB 3
+let mqttClient: mqtt.MqttClient | null = null;
 
-// Conecta ao Broker MQTT para telemetria
-const mqttClient = mqtt.connect(BROKER_URL, {
-  clientId: `${CONTROLLER_ID}_${Math.random().toString(16).slice(2, 6)}`,
-});
+// Conecta ao Broker MQTT Eclipse Mosquitto para calcular votos honestos após o boot ordenado
+function iniciarMqtt(): void {
+  // Inicializa o cliente MQTT atribuindo um identificador exclusivo para o Controlador 3
+  const client = mqtt.connect(BROKER_URL, {
+    // Identificador exclusivo da sessão MQTT do Controlador 3
+    clientId: `${CONTROLLER_ID}_${Math.random().toString(16).slice(2, 6)}`,
+  });
+  // Armazena a instância conectada no escopo do módulo
+  mqttClient = client;
 
-// Assina tópicos de telemetria
-mqttClient.on('connect', () => {
-  console.log(`[${CONTROLLER_ID}] Conectado ao Broker MQTT em ${BROKER_URL}`);
-  const topicosAssinados = [
-    'clinica/sala1/ruido',
-    'clinica/sala1/bpm',
-    'clinica/sala1/presenca',
-    'clinica/sala1/porta',
-    'clinica/recepcao/checkin',
-  ];
-  mqttClient.subscribe(topicosAssinados, { qos: 0 });
-});
+  // Assina os mesmos tópicos de telemetria e recepção que os controladores 1 e 2
+  client.on('connect', () => {
+    console.log(`[${CONTROLLER_ID}] Conectado ao Broker MQTT em ${BROKER_URL}`);
+    const topicosAssinados = [
+      'clinica/sala1/ruido',
+      'clinica/sala1/bpm',
+      'clinica/sala1/presenca',
+      'clinica/sala1/porta',
+    ];
+    client.subscribe(topicosAssinados, { qos: 0 });
+  });
 
-// Atualiza o estado em memória local a partir da telemetria
-mqttClient.on('message', (topic, message) => {
-  try {
-    const dados = JSON.parse(message.toString());
-    const ts = dados.timestamp || new Date().toISOString();
-
-    if (topic === 'clinica/sala1/ruido' && typeof dados.db === 'number') {
-      estadoLocal.ruidoDb = dados.db;
-      estadoLocal.ultimaAtualizacao = ts;
-    } else if (topic === 'clinica/sala1/bpm' && typeof dados.bpm === 'number') {
-      estadoLocal.bpm = dados.bpm;
-      estadoLocal.ultimaAtualizacao = ts;
-    } else if (topic === 'clinica/recepcao/checkin') {
-      const { acao, nome, musica, cor } = dados;
-      if (acao === 'entrar_fila') {
-        const nomeLimpo = (nome || '').trim();
-        if (!estadoLocal.presenca) {
-          estadoLocal.presenca = true;
-          estadoLocal.tagId = nomeLimpo;
-          estadoLocal.musicaFavorita = musica || 'Rock';
-          estadoLocal.corFavorita = cor || 'Azul';
-        }
+  // Processa as mensagens MQTT em estadoTelemetria aplicando exatamente as mesmas regras clínicas determinísticas
+  client.on('message', (topic, message) => {
+    try {
+      const dados = JSON.parse(message.toString());
+      const resultado = aplicarEventoMqtt(estadoTelemetria, topic, dados);
+      if (resultado.relevante) {
+        estadoTelemetria = resultado.candidato;
       }
+    } catch {
+      // Ignora mensagens malformadas silenciosamente
     }
-  } catch {
-    // Trata erros silenciosamente
-  }
-});
+  });
+}
 
-// Instancia o servidor gRPC para expor serviços na porta 3003
+// Instancia o servidor gRPC puro na porta 3003
 const grpcServer = new grpc.Server();
 
 // Registra os métodos do serviço externo MiddlewareClinico
 grpcServer.addService(diverterapiaProto.MiddlewareClinico.service, {
+  // Handler RPC ObterStatus
   ObterStatus: async (_call: any, callback: any) => {
     try {
       const status = await objetoControlador.obterStatus();
@@ -393,6 +351,7 @@ grpcServer.addService(diverterapiaProto.MiddlewareClinico.service, {
     }
   },
 
+  // Handler RPC AtivarModoCalmaManual
   AtivarModoCalmaManual: async (call: any, callback: any) => {
     try {
       const origem = call.request?.origem || 'Dashboard Cliente';
@@ -404,17 +363,20 @@ grpcServer.addService(diverterapiaProto.MiddlewareClinico.service, {
         porta: resultado.porta,
         mensagem: resultado.mensagem,
         estado: sanitizarEstadoParaGrpc(resultado.estado),
+        simularFalhaBizantina: resultado.simularFalhaBizantina,
       });
     } catch (err: any) {
       callback({ code: grpc.status.INTERNAL, message: err?.message });
     }
   },
 
+  // Handler RPC InvocarMetodo
   InvocarMetodo: async (call: any, callback: any) => {
     try {
       const { metodo, origem, parametros } = call.request;
+      const clienteOrigem = origem || 'Dashboard Cliente';
       if (metodo === 'configurarAtuadores') {
-        const resultado = await objetoControlador.configurarAtuadores(parametros || {});
+        const resultado = await objetoControlador.configurarAtuadores(clienteOrigem, parametros || {});
         callback(null, {
           sucesso: resultado.sucesso,
           metodoInvocado: resultado.metodoInvocado,
@@ -422,9 +384,10 @@ grpcServer.addService(diverterapiaProto.MiddlewareClinico.service, {
           porta: resultado.porta,
           mensagem: resultado.mensagem,
           estado: sanitizarEstadoParaGrpc(resultado.estado),
+          simularFalhaBizantina: resultado.simularFalhaBizantina,
         });
       } else {
-        const resultado = await objetoControlador.ativarModoCalmaManual(origem || 'Cliente');
+        const resultado = await objetoControlador.ativarModoCalmaManual(clienteOrigem);
         callback(null, {
           sucesso: resultado.sucesso,
           metodoInvocado: resultado.metodoInvocado,
@@ -432,6 +395,7 @@ grpcServer.addService(diverterapiaProto.MiddlewareClinico.service, {
           porta: resultado.porta,
           mensagem: resultado.mensagem,
           estado: sanitizarEstadoParaGrpc(resultado.estado),
+          simularFalhaBizantina: resultado.simularFalhaBizantina,
         });
       }
     } catch (err: any) {
@@ -439,7 +403,7 @@ grpcServer.addService(diverterapiaProto.MiddlewareClinico.service, {
     }
   },
 
-  // Alterna o estado da injeção de falha bizantina
+  // Alterna a flag de simulação de falha bizantina e retorna seu novo estado no campo dedicado
   ToggleBizantino: async (_call: any, callback: any) => {
     simularFalhaBizantina = !simularFalhaBizantina;
     console.log(`⚠️ [${CONTROLLER_ID}] Modo Falha Bizantina alterado via gRPC para: ${simularFalhaBizantina ? 'ATIVO' : 'INATIVO'}`);
@@ -449,33 +413,21 @@ grpcServer.addService(diverterapiaProto.MiddlewareClinico.service, {
       processadoPor: CONTROLLER_ID,
       porta: GRPC_PORT,
       mensagem: `Simulação de Falha Bizantina alterada para: ${simularFalhaBizantina ? 'ATIVO' : 'INATIVO'}`,
-      estado: sanitizarEstadoParaGrpc(estadoLocal),
+      estado: sanitizarEstadoParaGrpc(estadoConfirmado),
+      simularFalhaBizantina,
     });
   },
 });
 
-// Registra o serviço ConsensoInterno para colaboração com o Líder
+// Registra os métodos do serviço interno ConsensoInterno
 grpcServer.addService(diverterapiaProto.ConsensoInterno.service, {
-  // Handler RPC VotarEstado: adulteração proposital para testar descarte pelo Quorum do Líder
+  // Handler RPC VotarEstado: adultera se flag ativa ou vota honestamente (inclusive INVOCACAO_METODO) se inativa
   VotarEstado: async (call: any, callback: any) => {
-    const { tipoEvento } = call.request;
+    const { tipoEvento, estadoCandidato } = call.request;
 
-    // Se a simulação bizantina estiver ativa, corrompe intencionalmente a resposta
+    // Quando a simulação bizantina está ativa, envia voto deliberadamente corrompido
     if (simularFalhaBizantina) {
-      const estadoAdulterado = {
-        ...estadoLocal,
-        ruidoDb: 999,
-        bpm: 250,
-        presenca: !estadoLocal.presenca,
-        tagId: 'DADO_ADULTERADO_BIZANTINO',
-        musicaFavorita: 'sirene-descalibrada',
-        corFavorita: 'vermelho-bizantino',
-        iluminacao: 'Vermelho / Alerta Falso',
-        smartSpeaker: 'Sirene Descalibrada',
-        displayPorta: '> ERRO BIZANTINO / INVASÃO DETECTADA',
-        modoCalmaAtivo: !estadoLocal.modoCalmaAtivo,
-      };
-
+      const estadoAdulterado = gerarEstadoAdulterado(estadoTelemetria);
       console.log(`⚠️ [${CONTROLLER_ID}] Voto BIZANTINO ADULTERADO emitido ao Líder (Ruído: 999dB, BPM: 250, Evento: ${tipoEvento})`);
 
       callback(null, {
@@ -485,35 +437,87 @@ grpcServer.addService(diverterapiaProto.ConsensoInterno.service, {
         estadoVotado: sanitizarEstadoParaGrpc(estadoAdulterado),
         justificativa: 'FALHA_BIZANTINA: Dados adulterados deliberadamente para validar o Quorum 2x1 do Líder',
       });
-    } else {
-      // Se a simulação bizantina estiver inativa, vota de forma íntegra e honesta
-      console.log(`✅ [${CONTROLLER_ID}] Voto ÍNTEGRO emitido ao Líder (Modo Honesto, Evento: ${tipoEvento})`);
+      return;
+    }
 
+    // Em modo honesto, valida INVOCACAO_METODO sem mutar estadoConfirmado antes de EfetivarEstado
+    if (tipoEvento === 'INVOCACAO_METODO' && estadoCandidato) {
+      const tag = String(estadoCandidato.tagId || '');
+      const ruido = Number(estadoCandidato.ruidoDb || 0);
+      const bpm = Number(estadoCandidato.bpm || 0);
+      const candidatoValido =
+        ruido >= 0 &&
+        ruido <= 150 &&
+        bpm >= 0 &&
+        bpm <= 220 &&
+        !tag.includes('BIZANTINO') &&
+        !tag.includes('HACKED');
+
+      if (!candidatoValido) {
+        callback(null, {
+          controlador: CONTROLLER_ID,
+          porta: GRPC_PORT,
+          aprova: false,
+          estadoVotado: sanitizarEstadoParaGrpc(estadoConfirmado),
+          justificativa: 'Voto REJEITADO pela Réplica 3 em modo honesto.',
+        });
+        return;
+      }
+
+      const estadoValidadoTemp = normalizarEstadoRecebido(estadoCandidato);
+      console.log(`✅ [${CONTROLLER_ID}] Voto ÍNTEGRO emitido ao Líder (Modo Honesto, Evento: ${tipoEvento})`);
       callback(null, {
         controlador: CONTROLLER_ID,
         porta: GRPC_PORT,
         aprova: true,
-        estadoVotado: sanitizarEstadoParaGrpc(estadoLocal),
+        estadoVotado: sanitizarEstadoParaGrpc(estadoValidadoTemp),
         justificativa: `Voto íntegro e honesto emitido pela Réplica 3 (Porta ${GRPC_PORT})`,
       });
+      return;
     }
+
+    // Em modo honesto para eventos MQTT, aguarda até 160ms para sincronizar entrega do Mosquitto
+    const tsAlvo = estadoCandidato?.ultimaAtualizacao;
+    if (tsAlvo) {
+      let tentativas = 0;
+      while (estadoTelemetria.ultimaAtualizacao !== tsAlvo && tentativas < 8) {
+        await esperarMs(20);
+        tentativas++;
+      }
+    }
+
+    // Emite voto honesto fundamentado pelo estadoTelemetria calculado localmente
+    console.log(`✅ [${CONTROLLER_ID}] Voto ÍNTEGRO emitido ao Líder (Modo Honesto, Evento: ${tipoEvento})`);
+    callback(null, {
+      controlador: CONTROLLER_ID,
+      porta: GRPC_PORT,
+      aprova: true,
+      estadoVotado: sanitizarEstadoParaGrpc(estadoTelemetria),
+      justificativa: `Voto íntegro e honesto emitido pela Réplica 3 (Porta ${GRPC_PORT})`,
+    });
   },
 
-  // Handler RPC EfetivarEstado: persiste o estado validado pelo Quorum do Líder no MongoDB 3
+  // Handler RPC EfetivarEstado: sempre grava o estado íntegro aprovado pelo Quorum no MongoDB 3 (corrige o nó 3)
   EfetivarEstado: async (call: any, callback: any) => {
     try {
       const { tipo, descricao, estadoValidado } = call.request;
       if (estadoValidado) {
-        Object.assign(estadoLocal, estadoValidado);
+        // Sobrescreve os buffers locais com o estado aprovado garantindo sincronismo do MongoDB 3
+        estadoConfirmado = normalizarEstadoRecebido(estadoValidado);
+        estadoTelemetria = clonarEstado(estadoConfirmado);
       }
-      await salvarReplicaMongoDB(tipo || 'CONSENSO', `${descricao} [Efetivado via Líder]`);
+      // Persiste preservando exatamente o histórico consolidado enviado pelo Líder
+      const gravouBanco = await salvarReplicaMongoDB(tipo || 'CONSENSO', `${descricao} [Efetivado via Líder]`, false);
       callback(null, {
         sucesso: true,
         metodoInvocado: 'EfetivarEstado()',
         processadoPor: CONTROLLER_ID,
         porta: GRPC_PORT,
-        mensagem: `Estado validado pelo Quorum persistido no MongoDB 3!`,
-        estado: sanitizarEstadoParaGrpc(estadoLocal),
+        mensagem: gravouBanco
+          ? 'Estado validado pelo Quorum persistido no MongoDB 3!'
+          : 'Estado validado pelo Quorum mantido em RAM (MongoDB 3 offline)!',
+        estado: sanitizarEstadoParaGrpc(estadoConfirmado),
+        simularFalhaBizantina,
       });
     } catch (err: any) {
       callback({ code: grpc.status.INTERNAL, message: err?.message || 'Erro ao efetivar' });
@@ -521,19 +525,32 @@ grpcServer.addService(diverterapiaProto.ConsensoInterno.service, {
   },
 });
 
-// Vincula o servidor gRPC na porta 3003
-grpcServer.bindAsync(
-  `0.0.0.0:${GRPC_PORT}`,
-  grpc.ServerCredentials.createInsecure(),
-  (err, port) => {
-    if (err) {
-      console.error(`[${CONTROLLER_ID}] Erro ao vincular porta gRPC ${GRPC_PORT}:`, err);
-      return;
+// Função de inicialização ordenada garantindo recovery do MongoDB 3 e catch-up antes do MQTT e gRPC
+async function iniciarServidor(): Promise<void> {
+  // Conecta, realiza crash-recovery no MongoDB 3 e ativa a reconexão automática
+  await persistenciaMongo.inicializar();
+  // Consulta o Líder 1 (ou Controlador 2) para absorver eventos perdidos caso o Nó 3 tenha reiniciado
+  await sincronizarCatchUpComLider();
+  // Conecta ao Broker Mosquitto somente após concluir o crash-recovery e catch-up
+  iniciarMqtt();
+  // Inicia servidor gRPC na porta 3003
+  grpcServer.bindAsync(
+    `0.0.0.0:${GRPC_PORT}`,
+    grpc.ServerCredentials.createInsecure(),
+    (err, port) => {
+      if (err) {
+        console.error(`[${CONTROLLER_ID}] Erro ao vincular porta gRPC ${GRPC_PORT}:`, err);
+        return;
+      }
+      console.log(`=====================================================`);
+      console.log(`[MIDDLEWARE gRPC] ${CONTROLLER_ID} (RÉPLICA BIZANTINA) ativo na porta ${port}`);
+      // Exibe o status real de conexão com o MongoDB 3 ou Fallback RAM
+      console.log(`   -> Armazenamento: ${persistenciaMongo.obterArmazenamentoId()}`);
+      console.log(`   -> Simulação Bizantina: ${simularFalhaBizantina ? 'ATIVA' : 'INATIVA'}`);
+      console.log(`=====================================================`);
     }
-    console.log(`=====================================================`);
-    console.log(`[MIDDLEWARE gRPC] ${CONTROLLER_ID} (RÉPLICA BIZANTINA) ativo na porta ${port}`);
-    console.log(`   -> Banco de Dados: ${MONGO_URI}`);
-    console.log(`   -> Simulação Bizantina: ${simularFalhaBizantina ? 'ATIVA' : 'INATIVA'}`);
-    console.log(`=====================================================`);
-  }
-);
+  );
+}
+
+// Dispara a inicialização ordenada do Controlador 3
+iniciarServidor();

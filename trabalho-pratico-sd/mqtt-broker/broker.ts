@@ -10,8 +10,20 @@ const server = createServer(broker.handle);
 // Define a porta padrão 1883 do protocolo MQTT para escuta de conexões na rede local
 const PORT = 1883;
 
+// Trata o erro EADDRINUSE de forma elegante caso o container Docker do Mosquitto já esteja ativo na porta 1883
+server.on('error', (err: NodeJS.ErrnoException) => {
+  // Verifica se a porta 1883 já está ocupada (ex: container Docker diverterapia-mqtt-broker rodando)
+  if (err.code === 'EADDRINUSE') {
+    // Informa que um broker MQTT externo já está ativo na porta 1883 e mantém o processo tranquilo
+    console.log(`[BROKER MQTT] Porta ${PORT} já está ativa (Broker Docker/Externo detectado). Usando broker existente.`);
+    return;
+  }
+  // Loga outros erros inesperados de socket TCP
+  console.error(`[BROKER MQTT] Erro no servidor TCP:`, err.message);
+});
+
 // Inicia o servidor TCP na porta especificada e executa o callback assim que estiver pronto
-server.listen(PORT, () => {
+server.listen(PORT, '0.0.0.0', () => {
   // Exibe no console um cabeçalho visual confirmando que o Broker MQTT está online e operante
   console.log(`=====================================================`);
   // Informa a porta exata em que o Broker da Clínica Pediátrica está aguardando conexões
@@ -50,4 +62,3 @@ broker.on('publish', (packet, client) => {
     console.log(`[PUBLISH] De: ${client.id} | Tópico: ${packet.topic} | Payload: ${mensagem}`);
   }
 });
-

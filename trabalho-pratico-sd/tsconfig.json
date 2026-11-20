@@ -11,7 +11,6 @@
     "rootDir": "./"
   },
   "include": [
-    "mqtt-broker/**/*",
     "sensores/**/*",
     "atuadores/**/*",
     "controladores/**/*"

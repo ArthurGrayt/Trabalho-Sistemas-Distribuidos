@@ -1,8 +1,8 @@
 // Importa a biblioteca 'mqtt' para conectar o sistema de iluminação inteligente ao broker
 import mqtt from 'mqtt';
 
-// Define a URL do broker MQTT local
-const BROKER_URL = 'mqtt://localhost:1883';
+// Define a URL do broker MQTT local (127.0.0.1 para evitar atrasos IPv6 no Windows)
+const BROKER_URL = 'mqtt://127.0.0.1:1883';
 // Define o tópico exclusivo para recebimento de comandos de iluminação da Sala 1
 const TOPIC_COMANDO = 'clinica/sala1/comando/luz';
 

@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from 'next/server';
 // Importa a biblioteca 'mqtt' para conectar este endpoint HTTP ao broker MQTT local na porta 1883
 import mqtt from 'mqtt';
 
-// Define o endereço local do Broker MQTT (Aedes) rodando na porta 1883
+// Define o endereço local do Broker MQTT (Eclipse Mosquitto) rodando na porta 1883
 const BROKER_URL = 'mqtt://127.0.0.1:1883';
 
 // Exporta a função assíncrona POST para tratar requisições enviadas pelo Simulador Mobile (/simulador)
@@ -43,7 +43,7 @@ export async function POST(req: NextRequest) {
     await new Promise<void>((resolve, reject) => {
       // Conecta ao broker MQTT local com um clientId exclusivo para a ponte HTTP-MQTT
       const client = mqtt.connect(BROKER_URL, {
-        // Identifica este publicador nos logs do broker Aedes
+        // Identifica este publicador nos logs do broker Eclipse Mosquitto
         clientId: `bridge_http_mqtt_${Math.random().toString(16).slice(2, 7)}`,
         // Define timeout de conexão de 2500ms para evitar travamento caso o broker esteja desligado
         connectTimeout: 2500,

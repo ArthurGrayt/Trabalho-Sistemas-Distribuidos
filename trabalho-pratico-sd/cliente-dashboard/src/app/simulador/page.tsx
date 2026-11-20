@@ -6,7 +6,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 // Importa o componente Link do Next.js para navegação rápida de volta ao Dashboard principal
 import Link from 'next/link';
 // Importa os ícones solicitados da biblioteca lucide-react mantendo o layout homologado
-import { User, Activity, Volume2, Mic, MicOff, CheckCircle2, AlertCircle, Loader2, ArrowLeft, LogOut, Clock, Sparkles } from 'lucide-react';
+import { User, Activity, Volume2, Mic, MicOff, CheckCircle2, AlertCircle, Loader2, ArrowLeft, LogOut } from 'lucide-react';
 
 // Interface que define a estrutura da notificação (Toast) sutil exibida no topo da tela mobile
 interface ToastInfo {
@@ -18,19 +18,7 @@ interface ToastInfo {
   tipo: 'sucesso' | 'erro';
 }
 
-// Interface para os itens da fila de espera recebidos do middleware
-interface ItemFila {
-  // Nome do paciente na fila
-  nome: string;
-  // Estilo musical selecionado
-  musica: string;
-  // Cor favorita para iluminação
-  cor: string;
-  // Horário em que entrou na fila
-  horario?: string;
-}
-
-// Componente principal da página do Simulador Mobile (/simulador) com gerenciamento de fila de espera
+// Componente principal da página do Simulador Mobile (/simulador) para envio de telemetria e presença
 export default function SimuladorMobilePage() {
   // Estado para o campo "Nome da Criança" no Card 1
   const [nomeCrianca, setNomeCrianca] = useState<string>('');
@@ -38,15 +26,11 @@ export default function SimuladorMobilePage() {
   const [corFavorita, setCorFavorita] = useState<string>('Azul');
   // Estado para o Dropdown de estilos musicais (Opções: Rock, Pop, Eletrônica, Gospel, Acústica)
   const [estiloMusical, setEstiloMusical] = useState<string>('Rock');
-  // Estado que sinaliza se as preferências foram salvas pelo aluno
-  const [preferenciasSalvas, setPreferenciasSalvas] = useState<boolean>(false);
-  // Estado que armazena a lista atual da fila de espera sincronizada com o cluster
-  const [filaEspera, setFilaEspera] = useState<ItemFila[]>([]);
   // Estado que indica se a Sala 1 está ocupada no momento
   const [salaOcupada, setSalaOcupada] = useState<boolean>(false);
   // Estado com o nome do paciente que está atualmente dentro da Sala 1
   const [ocupanteAtual, setOcupanteAtual] = useState<string>('Nenhum paciente');
-  // Estado de carregamento exclusivo dos botões de presença/fila no Card 1
+  // Estado de carregamento exclusivo dos botões de presença no Card 1
   const [enviandoPresenca, setEnviandoPresenca] = useState<boolean>(false);
 
   // Estado para o valor atual de batimentos cardíacos (BPM) no Card 2 (60 a 160)
@@ -88,11 +72,6 @@ export default function SimuladorMobilePage() {
     ocupanteAtual.trim().toLowerCase() === nomeCrianca.trim().toLowerCase()
   );
 
-  // Calcula a posição deste aluno na fila de espera (-1 se não estiver na fila)
-  const minhaPosicaoNaFila = filaEspera.findIndex(
-    (item) => nomeCrianca.trim() && item.nome.trim().toLowerCase() === nomeCrianca.trim().toLowerCase()
-  );
-
   // Função auxiliar que exibe um toast discreto e o remove automaticamente após 2,5 segundos
   const exibirToast = useCallback((mensagem: string, tipo: 'sucesso' | 'erro' = 'sucesso') => {
     // Define o novo toast com timestamp atual como ID
@@ -111,8 +90,8 @@ export default function SimuladorMobilePage() {
     return () => clearTimeout(timer);
   }, [toast]);
 
-  // Função periódica de polling que consulta o status do middleware e a fila de espera em tempo real
-  const sincronizarStatusEFila = useCallback(async () => {
+  // Função periódica de polling que consulta o status atual da Sala 1 no middleware em tempo real
+  const sincronizarStatusSala = useCallback(async () => {
     try {
       // Faz requisição para a rota interna /api/status do Next.js (compatível com qualquer celular na rede)
       const res = await fetch('/api/status', { cache: 'no-store' });
@@ -127,10 +106,6 @@ export default function SimuladorMobilePage() {
           setSalaOcupada(Boolean(est.presenca));
           // Atualiza o nome de quem está na sala
           setOcupanteAtual(est.tagId || 'Nenhum paciente');
-          // Atualiza a lista da fila de espera
-          if (Array.isArray(est.filaEspera)) {
-            setFilaEspera(est.filaEspera);
-          }
         }
       }
     } catch {
@@ -138,17 +113,17 @@ export default function SimuladorMobilePage() {
     }
   }, []);
 
-  // Hook que executa o polling a cada 1000ms para garantir transição automática de fila entre múltiplos celulares
+  // Hook que executa o polling a cada 1000ms para manter o estado da sala sincronizado
   useEffect(() => {
     // Sincronização inicial imediata
-    sincronizarStatusEFila();
+    sincronizarStatusSala();
     // Temporizador recorrente de 1 segundo
     const timer = setInterval(() => {
-      sincronizarStatusEFila();
+      sincronizarStatusSala();
     }, 1000);
     // Limpeza ao desmontar
     return () => clearInterval(timer);
-  }, [sincronizarStatusEFila]);
+  }, [sincronizarStatusSala]);
 
   // Função genérica que envia o POST para a rota Ponte HTTP -> MQTT (/api/mqtt/publish)
   const publicarNoMqtt = useCallback(
@@ -175,8 +150,10 @@ export default function SimuladorMobilePage() {
     [exibirToast]
   );
 
-  // Handler do Botão "Salvar Preferências": publica no tópico clinica/recepcao/checkin e entra na fila de espera
-  const handleSalvarPreferencias = async () => {
+  // Handler do Botão "Simular Entrada": publica diretamente no tópico clinica/sala1/porta
+  const handleSimularEntrada = async (e: React.FormEvent) => {
+    // Previne envio padrão do formulário
+    e.preventDefault();
     // Remove espaços extras do nome da criança
     const nomeLimpo = nomeCrianca.trim();
 
@@ -189,24 +166,22 @@ export default function SimuladorMobilePage() {
     // Ativa estado de carregamento do botão
     setEnviandoPresenca(true);
     try {
-      // Publica no tópico clinica/recepcao/checkin com payload exigido: { acao: "entrar_fila", nome, musica, cor }
+      // Publica diretamente a entrada do paciente na Sala 1 com suas preferências
       await publicarNoMqtt(
-        'clinica/recepcao/checkin',
+        'clinica/sala1/porta',
         {
-          acao: 'entrar_fila',
+          presenca: true,
           nome: nomeLimpo,
           musica: estiloMusical,
           cor: corFavorita,
         },
-        'Preferências salvas'
+        `Entrada confirmada: ${nomeLimpo}`
       );
-      // Marca as preferências como salvas para alternar o botão para Simular Entrada ou Aguarde sua vez
-      setPreferenciasSalvas(true);
-      // Força sincronização imediata com o middleware
-      await sincronizarStatusEFila();
+      // Força sincronização imediata do estado da sala
+      await sincronizarStatusSala();
     } catch (err: unknown) {
       // Exibe toast em caso de falha de conexão
-      const msg = err instanceof Error ? err.message : 'Erro ao salvar preferências';
+      const msg = err instanceof Error ? err.message : 'Erro ao simular entrada';
       exibirToast(msg, 'erro');
     } finally {
       // Desativa estado de carregamento
@@ -214,62 +189,24 @@ export default function SimuladorMobilePage() {
     }
   };
 
-  // Handler do Botão "Simular Entrada" (acionado quando a sala está livre após salvar preferências)
-  const handleSimularEntrada = async (e: React.FormEvent) => {
-    // Previne envio padrão do formulário
-    e.preventDefault();
-    // Se as preferências ainda não foram salvas, salva primeiro
-    if (!preferenciasSalvas) {
-      await handleSalvarPreferencias();
-      return;
-    }
-
-    // Se a sala estiver livre, realiza o check-in imediato
-    if (!salaOcupada || estouNaSala) {
-      setEnviandoPresenca(true);
-      try {
-        await publicarNoMqtt(
-          'clinica/recepcao/checkin',
-          {
-            acao: 'entrar_fila',
-            nome: nomeCrianca.trim(),
-            musica: estiloMusical,
-            cor: corFavorita,
-          },
-          `Entrada confirmada: ${nomeCrianca.trim()}`
-        );
-        await sincronizarStatusEFila();
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : 'Erro ao simular entrada';
-        exibirToast(msg, 'erro');
-      } finally {
-        setEnviandoPresenca(false);
-      }
-    } else {
-      // Caso outro celular tenha ocupado a sala antes, avisa para aguardar
-      exibirToast('Sala ocupada por outro paciente. Você está na fila de espera.', 'erro');
-    }
-  };
-
-  // Handler para finalizar o atendimento e liberar a sala (o próximo da fila entra automaticamente no middleware)
+  // Handler para finalizar o atendimento e liberar a sala
   const handleFinalizarAtendimento = async () => {
     // Ativa estado de carregamento
     setEnviandoPresenca(true);
     try {
-      // Publica em clinica/sala1/porta { presenca: false } para disparar a admissão automática do próximo na fila
+      // Publica em clinica/sala1/porta { presenca: false } para liberar a sala
       await publicarNoMqtt(
         'clinica/sala1/porta',
         {
           presenca: false,
           nome: 'Nenhum paciente',
           musica: 'Aguardando paciente',
+          cor: 'Branco',
         },
         'Atendimento finalizado. Sala liberada!'
       );
-      // Reseta estado local de preferências salvas
-      setPreferenciasSalvas(false);
       // Atualiza o status imediatamente
-      await sincronizarStatusEFila();
+      await sincronizarStatusSala();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Erro ao liberar sala';
       exibirToast(msg, 'erro');
@@ -468,7 +405,7 @@ export default function SimuladorMobilePage() {
             <div className="flex items-center gap-2">
               <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
               <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
-                Diverterapia • Fila Distribuída
+                Diverterapia • Simulador IoT
               </span>
             </div>
             <h1 className="text-lg font-bold tracking-tight text-zinc-100 mt-0.5">
@@ -486,7 +423,7 @@ export default function SimuladorMobilePage() {
           </Link>
         </header>
 
-        {/* CARD 1: Presença e Gerenciamento de Fila de Espera */}
+        {/* CARD 1: Presença e Preferências do Paciente */}
         <section className="bg-zinc-900/40 border border-white/5 rounded-3xl p-6 flex flex-col gap-5">
           {/* Cabeçalho do Card 1 */}
           <div className="flex items-center justify-between">
@@ -496,10 +433,10 @@ export default function SimuladorMobilePage() {
                 Entrada do Paciente
               </h2>
             </div>
-            <span className="text-[10px] font-mono text-zinc-600">clinica/recepcao/checkin</span>
+            <span className="text-[10px] font-mono text-zinc-600">clinica/sala1/porta</span>
           </div>
 
-          {/* FEEDBACK VISUAL DE FILA (STATE) */}
+          {/* FEEDBACK VISUAL DA SITUAÇÃO DA SALA */}
           <div className="p-3.5 rounded-2xl bg-black/20 border border-white/5 flex flex-col gap-1.5">
             <div className="flex items-center justify-between">
               <span className="text-[11px] text-zinc-500 font-medium">Situação da Sala:</span>
@@ -508,8 +445,6 @@ export default function SimuladorMobilePage() {
                 className={`text-xs font-semibold flex items-center gap-1.5 ${
                   estouNaSala
                     ? 'text-emerald-400'
-                    : minhaPosicaoNaFila >= 0
-                    ? 'text-amber-400'
                     : salaOcupada
                     ? 'text-zinc-400'
                     : 'text-emerald-400'
@@ -519,8 +454,6 @@ export default function SimuladorMobilePage() {
                   className={`h-2 w-2 rounded-full ${
                     estouNaSala
                       ? 'bg-emerald-400 animate-pulse'
-                      : minhaPosicaoNaFila >= 0
-                      ? 'bg-amber-400 animate-pulse'
                       : salaOcupada
                       ? 'bg-zinc-500'
                       : 'bg-emerald-400'
@@ -528,35 +461,29 @@ export default function SimuladorMobilePage() {
                 />
                 {estouNaSala
                   ? 'Você está na Sala 1'
-                  : minhaPosicaoNaFila >= 0
-                  ? `Aguarde sua vez (${minhaPosicaoNaFila + 1}º na fila)`
                   : salaOcupada
                   ? `Ocupada (${ocupanteAtual})`
                   : 'Sala 1 Livre'}
               </span>
             </div>
 
-            {/* Mensagem Explicativa de Transição Automática de Fila */}
+            {/* Mensagem Explicativa do Status da Sala */}
             <p className="text-[11px] text-zinc-500 leading-relaxed">
               {estouNaSala ? (
                 <span className="text-emerald-400/90">
                   Seus dados e atuadores estão sincronizados com a sala em tempo real.
                 </span>
-              ) : minhaPosicaoNaFila >= 0 ? (
-                <span className="text-amber-300/90">
-                  Assim que {ocupanteAtual} sair, você entrará automaticamente na Sala 1.
-                </span>
               ) : salaOcupada ? (
                 <span>
-                  Sala ocupada no momento. Salve suas preferências para aguardar sua vez na fila.
+                  Sala ocupada no momento por {ocupanteAtual}. Você pode assumir a sala ou liberar o atendimento.
                 </span>
               ) : (
-                <span>Sala livre para atendimento imediato. Salve suas preferências para entrar.</span>
+                <span>Sala livre para atendimento imediato. Informe os dados e clique em Simular Entrada.</span>
               )}
             </p>
           </div>
 
-          {/* FORMULÁRIO COM NOVOS CAMPOS DROPDOWN */}
+          {/* FORMULÁRIO DE ENTRADA DO PACIENTE */}
           <form onSubmit={handleSimularEntrada} className="flex flex-col gap-4">
             {/* Campo 1: Nome da Criança */}
             <div className="flex flex-col gap-1.5">
@@ -566,10 +493,7 @@ export default function SimuladorMobilePage() {
               <input
                 type="text"
                 value={nomeCrianca}
-                onChange={(e) => {
-                  setNomeCrianca(e.target.value);
-                  setPreferenciasSalvas(false);
-                }}
+                onChange={(e) => setNomeCrianca(e.target.value)}
                 placeholder="Ex: Lucas (ou Sofia)"
                 className="w-full h-12 px-4 rounded-2xl bg-black/20 border border-white/5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-white/20 transition-all"
               />
@@ -582,10 +506,7 @@ export default function SimuladorMobilePage() {
               </label>
               <select
                 value={estiloMusical}
-                onChange={(e) => {
-                  setEstiloMusical(e.target.value);
-                  setPreferenciasSalvas(false);
-                }}
+                onChange={(e) => setEstiloMusical(e.target.value)}
                 className="w-full h-12 px-4 rounded-2xl bg-black/20 border border-white/5 text-sm text-zinc-100 focus:outline-none focus:border-white/20 transition-all cursor-pointer"
               >
                 <option value="Rock" className="bg-zinc-900 text-zinc-100">Rock</option>
@@ -603,10 +524,7 @@ export default function SimuladorMobilePage() {
               </label>
               <select
                 value={corFavorita}
-                onChange={(e) => {
-                  setCorFavorita(e.target.value);
-                  setPreferenciasSalvas(false);
-                }}
+                onChange={(e) => setCorFavorita(e.target.value)}
                 className="w-full h-12 px-4 rounded-2xl bg-black/20 border border-white/5 text-sm text-zinc-100 focus:outline-none focus:border-white/20 transition-all cursor-pointer"
               >
                 <option value="Azul" className="bg-zinc-900 text-zinc-100">Azul</option>
@@ -618,30 +536,10 @@ export default function SimuladorMobilePage() {
               </select>
             </div>
 
-            {/* BOTÕES DE AÇÃO: Salvar Preferências -> Simular Entrada / Aguarde sua vez */}
+            {/* BOTÕES DE AÇÃO: Simular Entrada ou Finalizar Atendimento */}
             <div className="flex flex-col gap-2.5 mt-1">
-              {!preferenciasSalvas ? (
-                /* Botão Inicial: Salvar Preferências */
-                <button
-                  type="button"
-                  onClick={handleSalvarPreferencias}
-                  disabled={enviandoPresenca}
-                  className="min-h-[48px] w-full rounded-2xl bg-white/10 hover:bg-white/15 active:scale-95 transition-all text-sm font-semibold text-zinc-100 flex items-center justify-center gap-2 disabled:opacity-50"
-                >
-                  {enviandoPresenca ? (
-                    <>
-                      <Loader2 className="w-4 h-4 animate-spin text-zinc-300" />
-                      <span>Salvando...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Sparkles className="w-4 h-4 text-zinc-300" />
-                      <span>Salvar Preferências</span>
-                    </>
-                  )}
-                </button>
-              ) : estouNaSala ? (
-                /* Botão quando este aluno está em atendimento na Sala 1 */
+              {estouNaSala ? (
+                /* Botão quando este paciente está em atendimento na Sala 1 */
                 <button
                   type="button"
                   onClick={handleFinalizarAtendimento}
@@ -655,8 +553,8 @@ export default function SimuladorMobilePage() {
                   )}
                   <span>Finalizar Atendimento (Liberar Sala)</span>
                 </button>
-              ) : !salaOcupada ? (
-                /* Botão após salvar preferências quando a sala está livre: Simular entrada */
+              ) : (
+                /* Botão para registrar entrada direta do paciente na Sala 1 */
                 <button
                   type="submit"
                   disabled={enviandoPresenca}
@@ -673,31 +571,6 @@ export default function SimuladorMobilePage() {
                       <span>Simular Entrada</span>
                     </>
                   )}
-                </button>
-              ) : (
-                /* Botão após salvar preferências quando a sala está ocupada: Aguarde sua vez */
-                <button
-                  type="button"
-                  disabled={true}
-                  className="min-h-[48px] w-full rounded-2xl bg-white/[0.04] border border-white/5 text-sm font-semibold text-zinc-400 flex items-center justify-center gap-2 cursor-not-allowed"
-                >
-                  <Clock className="w-4 h-4 text-amber-400 animate-spin" />
-                  <span>
-                    {minhaPosicaoNaFila >= 0
-                      ? `Aguarde sua vez (${minhaPosicaoNaFila + 1}º da fila)`
-                      : 'Aguarde sua vez (Na fila)'}
-                  </span>
-                </button>
-              )}
-
-              {/* Opção para alterar preferências salvas se ainda não estiver na sala */}
-              {preferenciasSalvas && !estouNaSala && (
-                <button
-                  type="button"
-                  onClick={() => setPreferenciasSalvas(false)}
-                  className="text-[11px] text-zinc-500 hover:text-zinc-300 transition py-1 text-center"
-                >
-                  Editar preferências salvas
                 </button>
               )}
             </div>

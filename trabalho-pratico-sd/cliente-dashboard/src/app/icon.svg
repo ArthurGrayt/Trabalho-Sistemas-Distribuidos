@@ -1,0 +1,7 @@
+<!-- Define o ícone vetorial SVG 32x32 do aplicativo Diverterapia para reconhecimento nativo pelo Next.js -->
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+  <!-- Desenha o fundo escuro (zinc-900) com borda sutil (zinc-700) e cantos arredondados de 6px -->
+  <rect x="0.5" y="0.5" width="31" height="31" rx="6" fill="#18181b" stroke="#3f3f46" stroke-width="1" />
+  <!-- Renderiza as iniciais "DT" centralizadas em verde esmeralda (emerald-400) e fonte sans-serif negrito -->
+  <text x="16" y="21" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="14" font-weight="700" fill="#34d399">DT</text>
+</svg>

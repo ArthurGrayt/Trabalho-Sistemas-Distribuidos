@@ -24,7 +24,7 @@ cd cliente-dashboard && npm install && cd ..
 ```
 
 ### 3. Iniciar Toda a Aplicação
-Executa simultaneamente o broker interno, os 3 controladores gRPC, sensores IoT, atuadores e o Next.js:
+Executa simultaneamente os 3 controladores gRPC, os 3 sensores IoT, os 3 atuadores e o frontend Next.js (conectados ao Mosquitto e MongoDBs do Docker):
 ```bash
 npm run start:all
 ```
@@ -38,11 +38,11 @@ npm run start:all
 
 Para entender a fundo como cada engrenagem do projeto funciona, para que serve cada componente e a teoria acadêmica de Sistemas Distribuídos aplicada, acesse o nosso manual técnico completo:
 
-👉 **[Manual Técnico e Arquitetural (docs/DOCUMENTACAO_TECNICA.md)](file:///c:/Users/arthur/Desktop/IF/Trabalho%20SD/trabalho-pratico-sd/docs/DOCUMENTACAO_TECNICA.md)**
+👉 **[Manual Técnico e Arquitetural (docs/DOCUMENTACAO_TECNICA.md)](./docs/DOCUMENTACAO_TECNICA.md)**
 
 A documentação está estruturada nos 4 quadrantes da metodologia Diátaxis:
 1. **Tutorial:** Guia prático de primeiros passos do zero ao primeiro atendimento na sala.
-2. **How-To Guides:** Como testar Quorum 2x1, injeção de falhas bizantinas, failover automático e fila de espera.
+2. **How-To Guides:** Como testar Quorum 2x1, injeção de falhas bizantinas e failover automático.
 3. **Reference:** Dicionário completo de portas, tópicos MQTT, schemas MongoDB e contrato Protobuf (`diverterapia.proto`).
 4. **Explanation:** Fundamentação teórica de Sistemas Distribuídos (por que consenso no backend, problema dos generais bizantinos, comparação MQTT vs. gRPC vs. HTTP).
 

@@ -6,11 +6,11 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 // Importa o componente Link do Next.js para acesso rápido à rota do Simulador Mobile (/simulador)
 import Link from 'next/link';
 
-// Interface que descreve a estrutura dos registros gravados no arquivo de armazenamento no disco
+// Interface que descreve a estrutura dos registros históricos persistidos no MongoDB de cada controlador
 interface RegistroHistorico {
   // Data e hora no formato ISO 8601 da gravação do evento
   horario: string;
-  // Categoria de classificação da operação (TELEMETRIA, REGRA_AUTOMATICA, INVOCACAO_METODO)
+  // Categoria de classificação da operação (TELEMETRIA, INVOCACAO_METODO, CONSENSO)
   tipo: string;
   // Detalhe descritivo legível sobre a alteração ocorrida
   descricao: string;
@@ -28,6 +28,8 @@ interface EstadoSala {
   tagId: string;
   // Música favorita do paciente enviada pelo Simulador Mobile (/simulador)
   musicaFavorita?: string;
+  // Cor favorita para iluminação enviada pelo Simulador Mobile (/simulador)
+  corFavorita?: string;
   // Estado e cor atual do sistema de iluminação
   iluminacao: string;
   // Nome do efeito sonoro ou trilha tocada no Smart Speaker
@@ -40,35 +42,63 @@ interface EstadoSala {
   overrideManualAte?: number;
   // Data e hora ISO da mais recente sincronização
   ultimaAtualizacao: string;
-  // Lista de eventos persistidos no banco de dados local do controlador
+  // Lista de eventos persistidos na instância MongoDB do controlador
   historico?: RegistroHistorico[];
 }
 
-// Interface para a resposta padrão entregue pela rota HTTP /status dos controladores
+// Interface para o resumo individual de saúde de um nó retornado pelo Gateway gRPC (/api/status)
+interface NoClusterApi {
+  // Identificador do controlador (ex: controlador-1)
+  id: string;
+  // Rótulo de exibição do nó
+  nome: string;
+  // Porta gRPC onde o nó responde
+  porta: number;
+  // Rota proxy no Gateway Next.js
+  url: string;
+  // Status real de conectividade gRPC do controlador
+  online: boolean;
+  // Integridade declarada (LIDER_HONESTO, HONESTO, LIDER_INTERINO, FALHA_BIZANTINA ou OFFLINE)
+  integridade: string;
+  // Identificador da instância MongoDB associada ao nó
+  armazenamentoId?: string;
+}
+
+// Interface para a resposta entregue pela rota Gateway gRPC /api/status
 interface RespostaControlador {
   // Identificador nominal do nó controlador (ex: controlador-1)
   controlador: string;
-  // Porta TCP onde o nó responde requisições HTTP
+  // Porta gRPC onde o nó responde chamadas RPC
   porta: number;
-  // Nome do arquivo de banco de dados associado a este nó
+  // Identificador da instância MongoDB associada a este nó
   armazenamentoId?: string;
-  // Integridade declarada pelo nó (HONESTO ou FALHA_BIZANTINA)
+  // Integridade declarada pelo nó (LIDER_HONESTO, HONESTO, LIDER_INTERINO ou FALHA_BIZANTINA)
   integridade: string;
   // Estado completo da sala mantido por este nó
   estado: EstadoSala;
+  // Porta que respondeu ao failover no Gateway gRPC
+  obtidoViaFailoverNaPorta?: number;
+  // Diagnóstico real dos 3 nós consultados pelo Gateway gRPC
+  cluster?: NoClusterApi[];
+  // Flag indicando se todas as réplicas íntegras do cluster estão inacessíveis
+  clusterIndisponivel?: boolean;
 }
 
-// Interface para o diagnóstico e situação de consenso de cada réplica
+// Interface para o diagnóstico e situação de consenso de cada réplica exibida na UI
 interface StatusNoControlador {
   // Rótulo de exibição do nó
   nome: string;
-  // URL base de rede do nó
+  // URL base de rota no Gateway gRPC
   url: string;
-  // Porta de comunicação HTTP
+  // Porta de comunicação gRPC
   porta: number;
-  // Flag informando se o nó respondeu à última requisição
+  // Flag real informando se o nó respondeu à última chamada gRPC
   online: boolean;
-  // Classificação do voto deste nó na rodada de votação
+  // Integridade reportada pelo nó
+  integridade?: string;
+  // Descrição do armazenamento real retornado pelo controlador (MongoDB conectado ou Fallback RAM)
+  armazenamentoId?: string;
+  // Classificação do voto deste nó no consenso de backend
   statusConsenso: 'CONSENSO_MAIORIA' | 'DESCARTADO_BIZANTINO' | 'OFFLINE';
   // Objeto de dados entregue pelo controlador caso online
   dados?: RespostaControlador;
@@ -172,27 +202,6 @@ const PRESETS_TERAPEUTICOS = [
   },
 ];
 
-// Função pura para produzir assinatura determinística para o algoritmo de Quorum
-function gerarAssinaturaEstado(estado: EstadoSala): string {
-  // Retorna string com os valores exatos que devem ser congruentes entre os nós
-  return JSON.stringify({
-    // Nível de decibéis
-    ruidoDb: estado.ruidoDb,
-    // Frequência cardíaca
-    bpm: estado.bpm,
-    // Presença física
-    presenca: estado.presenca,
-    // Pulseira do paciente
-    tagId: estado.tagId,
-    // Cor da lâmpada
-    iluminacao: estado.iluminacao,
-    // Áudio do speaker
-    smartSpeaker: estado.smartSpeaker,
-    // Estado do modo calma
-    modoCalmaAtivo: estado.modoCalmaAtivo,
-  });
-}
-
 // Componente visual principal da aplicação Next.js
 export default function DashboardPage() {
   // Estado que seleciona qual cliente está operando o painel (Cliente 1 ou 2)
@@ -207,8 +216,8 @@ export default function DashboardPage() {
   const [logsAuditoria, setLogsAuditoria] = useState<{ id: string; horario: string; tipo: string; mensagem: string }[]>([]);
   // Indicador de requisição HTTP remota em execução
   const [enviandoComando, setEnviandoComando] = useState<boolean>(false);
-  // Filtro de categorias do log de auditoria
-  const [filtroLog, setFiltroLog] = useState<'TODOS' | 'FAILOVER' | 'METODO'>('TODOS');
+  // Filtro de categorias do log de auditoria incluindo aba dedicada ao histórico persistido no MongoDB
+  const [filtroLog, setFiltroLog] = useState<'TODOS' | 'FAILOVER' | 'METODO' | 'HISTORICO_DB'>('TODOS');
 
   // Campo de cor no formulário customizado
   const [corCustom, setCorCustom] = useState<string>('azul/calma');
@@ -248,67 +257,90 @@ export default function DashboardPage() {
     }
   };
 
-  // Rotina simplificada de consulta ao Líder com Failover automático (Quorum 2x1 validado no Backend)
+  // Rotina de consulta ao estado validado no Backend e saúde real dos 3 nós via Gateway gRPC
   const consultarQuorumControladores = useCallback(async () => {
     try {
-      // Consulta a rota /api/status que obtém o estado validado do Controlador 1 (com Failover para 2 e 3)
-      const res = await fetchComTimeout('/api/status', { method: 'GET' }, 1500);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const dadosLider: RespostaControlador & { obtidoViaFailoverNaPorta?: number } = await res.json();
+      // Consulta /api/status que retorna o estado consolidado + diagnóstico real dos 3 controladores
+      const res = await fetchComTimeout('/api/status', { method: 'GET' }, 1800);
+      const dadosLider: RespostaControlador = await res.json().catch(() => ({} as RespostaControlador));
 
-      // Atualiza o estado da sala diretamente com os dados pré-validados pelo Líder
+      // Atualiza o diagnóstico visual dos 3 nós usando os dados reais retornados pelo Gateway gRPC
+      const clusterReal = Array.isArray(dadosLider?.cluster) ? dadosLider.cluster : [];
+      if (clusterReal.length > 0) {
+        // Mapeia cada nó reportado pelo backend para o formato exibido no card lateral
+        const diagnostico: StatusNoControlador[] = clusterReal.map((no) => {
+          // Determina o rótulo dinâmico conforme o papel atual (Líder, Líder Interino ou Réplica)
+          const rotulo =
+            no.porta === 3001
+              ? 'Controlador 1 (Líder)'
+              : no.porta === 3002
+              ? no.integridade === 'LIDER_INTERINO'
+                ? 'Controlador 2 (Líder Interino)'
+                : 'Controlador 2 (Réplica)'
+              : 'Controlador 3 (Bizantino)';
+
+          // Classifica o status de consenso com base na conectividade real e integridade declarada
+          const statusConsenso: StatusNoControlador['statusConsenso'] = !no.online
+            ? 'OFFLINE'
+            : no.integridade === 'FALHA_BIZANTINA'
+            ? 'DESCARTADO_BIZANTINO'
+            : 'CONSENSO_MAIORIA';
+
+          return {
+            nome: rotulo,
+            url: no.url,
+            porta: no.porta,
+            online: Boolean(no.online),
+            integridade: no.integridade,
+            // Repassa o status real de armazenamento (MongoDB conectado ou Fallback RAM) reportado pelo nó
+            armazenamentoId: no.armazenamentoId,
+            statusConsenso,
+            dados: no.porta === dadosLider.obtidoViaFailoverNaPorta ? dadosLider : undefined,
+          };
+        });
+
+        setNosControladores(diagnostico);
+
+        // Calcula o texto exato do resumo do cluster de acordo com o estado real das réplicas
+        const no1 = clusterReal.find((n) => n.porta === 3001);
+        const no2 = clusterReal.find((n) => n.porta === 3002);
+        const no3 = clusterReal.find((n) => n.porta === 3003);
+
+        if (!res.ok || dadosLider?.clusterIndisponivel) {
+          setResumoQuorum('Cluster indisponível — Nenhum controlador íntegro acessível.');
+        } else if (!no1?.online && no2?.online) {
+          setResumoQuorum('Failover Ativo — Controlador 2 operando como Líder Interino.');
+        } else if (no3?.online && no3?.integridade === 'FALHA_BIZANTINA') {
+          setResumoQuorum('Quorum 2x1 Validado no Backend — Voto bizantino do Nó 3 descartado pelo Líder.');
+        } else if (no1?.online && no2?.online && no3?.online) {
+          setResumoQuorum('Consenso Unânime (3/3) — 3 réplicas íntegras sincronizadas no Backend.');
+        } else if (no1?.online && (no2?.online || no3?.online)) {
+          setResumoQuorum('Quorum 2x1 Validado no Backend — Cluster operando com contingência parcial.');
+        } else {
+          setResumoQuorum('Cluster degradado — Menos de 2 nós íntegros disponíveis.');
+        }
+      }
+
+      // Interrompe a atualização do estado caso nenhum controlador esteja disponível
+      if (!res.ok || dadosLider?.clusterIndisponivel) return;
+
+      // Atualiza o estado da sala diretamente com os dados validados no Backend
       if (dadosLider && dadosLider.estado) {
         setEstadoConsenso(dadosLider.estado);
       }
-
-      // Consulta rápida ao Nó 3 para atualizar a indicação visual de falha bizantina
-      let no3BizantinoAtivo = true;
-      try {
-        const res3 = await fetchComTimeout('/api/controlador/3/status', { method: 'GET' }, 800);
-        if (res3.ok) {
-          const dados3 = await res3.json();
-          no3BizantinoAtivo = dados3.integridade === 'FALHA_BIZANTINA';
-        }
-      } catch {
-        // Trata timeout ou offline silenciosamente
-      }
-
-      // Constrói o diagnóstico visual dos 3 nós do cluster no Backend
-      const portaAtiva = dadosLider.obtidoViaFailoverNaPorta || dadosLider.porta || 3001;
-      const diagnostico: StatusNoControlador[] = [
-        {
-          nome: 'Controlador 1 (Líder)',
-          url: '/api/controlador/1',
-          porta: 3001,
-          online: portaAtiva === 3001,
-          statusConsenso: 'CONSENSO_MAIORIA',
-          dados: dadosLider,
-        },
-        {
-          nome: 'Controlador 2 (Réplica)',
-          url: '/api/controlador/2',
-          porta: 3002,
-          online: true,
-          statusConsenso: 'CONSENSO_MAIORIA',
-        },
-        {
-          nome: 'Controlador 3 (Bizantino)',
-          url: '/api/controlador/3',
-          porta: 3003,
-          online: true,
-          statusConsenso: no3BizantinoAtivo ? 'DESCARTADO_BIZANTINO' : 'CONSENSO_MAIORIA',
-        },
-      ];
-
-      setNosControladores(diagnostico);
-
-      // Atualiza a legenda de Quorum validado no Backend
-      if (no3BizantinoAtivo) {
-        setResumoQuorum('Quorum 2x1 Validado no Backend — Voto bizantino corrompido descartado pelo Líder.');
-      } else {
-        setResumoQuorum('Consenso unânime — 3 réplicas em perfeito acordo no Backend.');
-      }
     } catch {
+      // Em falha total de rede com o Gateway, marca todos os nós como offline
+      setNosControladores((prev) =>
+        prev.length > 0
+          ? prev.map((n) => ({ ...n, online: false, statusConsenso: 'OFFLINE' }))
+          : CONTROLADORES_CONFIG.map((cfg) => ({
+              nome: cfg.nome,
+              url: cfg.url,
+              porta: cfg.porta,
+              online: false,
+              statusConsenso: 'OFFLINE',
+            }))
+      );
       setResumoQuorum('Cluster indisponível — Todos os controladores estão offline.');
     }
   }, []);
@@ -329,12 +361,18 @@ export default function DashboardPage() {
   const ativarModoCalmaManualmente = async () => {
     setEnviandoComando(true);
     registrarLog('METODO', `[${identificacaoCliente}] Invocando ativarModoCalmaManual() no Controlador 1 (:3001)...`);
+    // Prepara payload identificando qual perfil cliente (Cliente 1 / Cliente 2) disparou a ação remota
+    const bodyOrigem = JSON.stringify({ origem: identificacaoCliente });
 
     // 1ª Tentativa no nó primário (Controlador 1 via gRPC)
     try {
-      const res1 = await fetchComTimeout('/api/controlador/1/modo-calma', { method: 'POST' }, 1500);
+      const res1 = await fetchComTimeout(
+        '/api/controlador/1/modo-calma',
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: bodyOrigem },
+        1500
+      );
       if (!res1.ok) throw new Error(`HTTP ${res1.status}`);
-      registrarLog('INFO', `Método executado com sucesso no Controlador Primário 1 (:3001) via gRPC`);
+      registrarLog('INFO', `Método executado com sucesso no Controlador Primário 1 (:3001) via gRPC (${identificacaoCliente})`);
       await consultarQuorumControladores();
       setEnviandoComando(false);
       return;
@@ -345,9 +383,13 @@ export default function DashboardPage() {
 
     // 2ª Tentativa no nó secundário (Controlador 2 via gRPC)
     try {
-      const res2 = await fetchComTimeout('/api/controlador/2/modo-calma', { method: 'POST' }, 1500);
+      const res2 = await fetchComTimeout(
+        '/api/controlador/2/modo-calma',
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: bodyOrigem },
+        1500
+      );
       if (!res2.ok) throw new Error(`HTTP ${res2.status}`);
-      registrarLog('INFO', `Failover concluído com sucesso via Controlador 2 (:3002) via gRPC`);
+      registrarLog('INFO', `Failover concluído com sucesso via Controlador 2 (:3002) via gRPC (${identificacaoCliente})`);
       await consultarQuorumControladores();
       setEnviandoComando(false);
       return;
@@ -358,12 +400,20 @@ export default function DashboardPage() {
 
     // 3ª Tentativa no nó terciário (Controlador 3 via gRPC)
     try {
-      const res3 = await fetchComTimeout('/api/controlador/3/modo-calma', { method: 'POST' }, 1500);
-      if (!res3.ok) throw new Error(`HTTP ${res3.status}`);
-      registrarLog('INFO', `Contingência executada no Controlador 3 (:3003) via gRPC`);
+      const res3 = await fetchComTimeout(
+        '/api/controlador/3/modo-calma',
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: bodyOrigem },
+        1500
+      );
+      const dados3 = await res3.json().catch(() => ({}));
+      if (!res3.ok || dados3?.sucesso === false) {
+        throw new Error(dados3?.mensagem || `HTTP ${res3.status}`);
+      }
+      registrarLog('INFO', `Contingência executada no Controlador 3 (:3003) via gRPC (${identificacaoCliente})`);
       await consultarQuorumControladores();
-    } catch {
-      registrarLog('ALERTA', `Falha total: nenhuma réplica do middleware respondeu.`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Nenhuma réplica disponível';
+      registrarLog('ALERTA', `Falha total ao ativar modo calma: ${msg}.`);
     } finally {
       setEnviandoComando(false);
     }
@@ -397,8 +447,11 @@ export default function DashboardPage() {
           },
           1500
         );
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        registrarLog('INFO', `Método executado com êxito através de ${cfg.nome}`);
+        const dadosRes = await res.json().catch(() => ({}));
+        if (!res.ok || dadosRes?.sucesso === false) {
+          throw new Error(dadosRes?.mensagem || `HTTP ${res.status}`);
+        }
+        registrarLog('INFO', `Método executado com êxito através de ${cfg.nome} (${identificacaoCliente})`);
         await consultarQuorumControladores();
         setEnviandoComando(false);
         return;
@@ -425,8 +478,15 @@ export default function DashboardPage() {
         ? estadoConsenso.tagId
         : 'Lucas';
 
-    // Determina a cor da iluminação a ser configurada
-    const corFinal = preset.cor;
+    // Obtém a cor favorita real do paciente ou utiliza 'Azul' como fallback seguro
+    const corPaciente =
+      estadoConsenso?.corFavorita && estadoConsenso.corFavorita !== 'Branco'
+        ? estadoConsenso.corFavorita
+        : 'Azul';
+
+    // Determina a cor da iluminação a ser configurada (usando cor favorita real no perfil personalizado)
+    const corFinal =
+      preset.id === 'personalizado' ? `Cor Favorita (${corPaciente})` : preset.cor;
 
     // Determina o som (no perfil personalizado, inclui a variável da música do paciente)
     const somFinal =
@@ -456,21 +516,35 @@ export default function DashboardPage() {
     }
   };
 
-  // Liga ou desliga a simulação de falha bizantina no Controlador 3
+  // Liga ou desliga a simulação de falha bizantina no Controlador 3 lendo o retorno tipado do gRPC
   const alternarModoBizantino = async () => {
     try {
       const res = await fetchComTimeout('/api/controlador/3/toggle-bizantino', { method: 'POST' }, 1500);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const dados = await res.json();
+      // Usa o campo booleano simularFalhaBizantina retornado por SucessoResponse (com fallback na mensagem)
+      const ativo =
+        typeof dados?.simularFalhaBizantina === 'boolean'
+          ? dados.simularFalhaBizantina
+          : String(dados?.mensagem || '').includes('ATIVO');
       registrarLog(
         'INFO',
         `Simulação no Controlador 3 alterada: ${
-          dados.simularFalhaBizantina ? 'Falha Bizantina Ativada' : 'Modo Honesto Restaurado'
+          ativo ? 'Falha Bizantina Ativada' : 'Modo Honesto Restaurado'
         }`
       );
       await consultarQuorumControladores();
     } catch {
       registrarLog('ALERTA', 'Não foi possível alternar simulação: Controlador 3 está offline.');
     }
+  };
+
+  // Formata timestamps ISO retornados pelo MongoDB para HH:MM:SS em pt-BR com fallback seguro
+  const formatarHorarioRegistro = (horarioIso: string): string => {
+    // Tenta converter a string ISO recebida para timestamp numérico
+    const data = new Date(horarioIso);
+    // Retorna o horário formatado se a data for válida, ou o texto original caso contrário
+    return Number.isNaN(data.getTime()) ? horarioIso : data.toLocaleTimeString('pt-BR');
   };
 
   // Filtra as mensagens exibidas no terminal de logs
@@ -562,7 +636,39 @@ export default function DashboardPage() {
       {/* Conteúdo Central da Aplicação */}
       <main className="mx-auto max-w-7xl w-full px-4 sm:px-6 py-6 flex-1 space-y-6">
         {/* Banner de Estado Clínico da Sala e Consenso (Hero Status) */}
-        
+        <div
+          className={`rounded-xl border px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 transition ${
+            nosOnlineCount === 0
+              ? 'border-rose-500/40 bg-rose-950/20 text-rose-200'
+              : nosControladores.some((n) => n.integridade === 'LIDER_INTERINO')
+              ? 'border-blue-500/40 bg-blue-950/20 text-blue-200'
+              : temBizantinoAtivo
+              ? 'border-amber-500/40 bg-amber-950/20 text-amber-200'
+              : 'border-emerald-500/40 bg-emerald-950/20 text-emerald-200'
+          }`}
+        >
+          {/* Lado Esquerdo: Indicador pulsante e texto do consenso atual */}
+          <div className="flex items-center gap-2.5 min-w-0">
+            <span
+              className={`h-2.5 w-2.5 rounded-full shrink-0 ${
+                nosOnlineCount === 0
+                  ? 'bg-rose-400'
+                  : nosControladores.some((n) => n.integridade === 'LIDER_INTERINO')
+                  ? 'bg-blue-400 animate-pulse'
+                  : temBizantinoAtivo
+                  ? 'bg-amber-400 animate-pulse'
+                  : 'bg-emerald-400 animate-pulse'
+              }`}
+            />
+            <span className="text-xs font-medium tracking-tight truncate">{resumoQuorum}</span>
+          </div>
+          {/* Lado Direito: Contagem real de nós gRPC online no cluster */}
+          <div className="flex items-center gap-2 shrink-0">
+            <span className="text-[11px] font-mono px-2.5 py-0.5 rounded-md border border-white/10 bg-black/25">
+              {nosOnlineCount}/3 nós gRPC online
+            </span>
+          </div>
+        </div>
 
         {/* Layout Principal em 2 Colunas com proporção ajustada (+15% na coluna esquerda) */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
@@ -669,11 +775,11 @@ export default function DashboardPage() {
                       {estadoConsenso?.presenca ? estadoConsenso.tagId : 'Nenhum paciente'}
                     </span>
                   </div>
-                  <div className="text-[10px] font-mono text-zinc-400 truncate">
+                  <div className="text-[10px] font-mono text-zinc-400 truncate space-y-0.5">
                     {estadoConsenso?.presenca ? (
-                      <>
+                      <div className="truncate">
                         Música: <span className="text-zinc-200 font-semibold">{estadoConsenso.musicaFavorita || estadoConsenso.smartSpeaker}</span>
-                      </>
+                      </div>
                     ) : (
                       <span>Aguardando entrada via /simulador</span>
                     )}
@@ -776,7 +882,7 @@ export default function DashboardPage() {
                     p.id === 'regulacao'
                       ? estadoConsenso?.modoCalmaAtivo || estadoConsenso?.iluminacao === 'Azul / Calmante'
                       : p.id === 'personalizado'
-                      ? (estadoConsenso?.iluminacao === 'Cor Favorita (Dinâmica)' ||
+                      ? (Boolean(estadoConsenso?.iluminacao?.startsWith('Cor Favorita')) ||
                          Boolean(estadoConsenso?.smartSpeaker?.startsWith('Playlist do Paciente'))) &&
                         !estadoConsenso?.modoCalmaAtivo
                       : estadoConsenso?.iluminacao === p.cor && !estadoConsenso?.modoCalmaAtivo;
@@ -845,43 +951,76 @@ export default function DashboardPage() {
                 </div>
               </div>
 
-              {/* Lista compacta dos 3 controladores */}
+              {/* Lista compacta dos 3 controladores com status real do armazenamento MongoDB */}
               <div className="space-y-2.5">
-                {nosControladores.map((no) => (
-                  <div
-                    key={no.porta}
-                    className={`p-3 rounded-lg border transition ${
-                      !no.online
-                        ? 'border-zinc-800/60 bg-zinc-900/20 opacity-50'
-                        : no.statusConsenso === 'DESCARTADO_BIZANTINO'
-                        ? 'border-amber-500/40 bg-amber-950/15'
-                        : 'border-zinc-800/80 bg-zinc-900/60'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <span className={`h-2 w-2 rounded-full ${no.online ? 'bg-emerald-400' : 'bg-rose-500'}`} />
-                        <span className="text-xs font-semibold text-zinc-200">{no.nome}</span>
-                        <span className="font-mono text-[10px] text-zinc-500">:{no.porta}</span>
+                {nosControladores.map((no) => {
+                  // Verifica se o identificador de armazenamento reporta conexão ativa ao MongoDB
+                  const bancoConectado = Boolean(no.armazenamentoId?.includes('[CONECTADO]'));
+                  // Extrai a porta do MongoDB (ex: 27017, 27018, 27019) quando presente na URI
+                  const matchPortaBanco = no.armazenamentoId?.match(/:(\d{4,5})(?:\/|\?|$)/);
+                  // Formata o sufixo compacto da porta para exibição no card da réplica
+                  const portaBancoLabel = matchPortaBanco ? `:${matchPortaBanco[1]}` : '';
+
+                  return (
+                    <div
+                      key={no.porta}
+                      className={`p-3 rounded-lg border transition space-y-1.5 ${
+                        !no.online
+                          ? 'border-zinc-800/60 bg-zinc-900/20 opacity-50'
+                          : no.statusConsenso === 'DESCARTADO_BIZANTINO'
+                          ? 'border-amber-500/40 bg-amber-950/15'
+                          : 'border-zinc-800/80 bg-zinc-900/60'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className={`h-2 w-2 rounded-full ${no.online ? 'bg-emerald-400' : 'bg-rose-500'}`} />
+                          <span className="text-xs font-semibold text-zinc-200">{no.nome}</span>
+                          <span className="font-mono text-[10px] text-zinc-500">:{no.porta}</span>
+                        </div>
+
+                        <span className={`text-[10px] font-medium px-2 py-0.5 rounded ${
+                          !no.online
+                            ? 'bg-rose-500/10 text-rose-400'
+                            : no.statusConsenso === 'DESCARTADO_BIZANTINO'
+                            ? 'bg-amber-500/15 text-amber-300'
+                            : 'bg-emerald-500/15 text-emerald-400'
+                        }`}>
+                          {!no.online ? 'Offline' : no.statusConsenso === 'DESCARTADO_BIZANTINO' ? 'Bizantino' : 'Voto Válido'}
+                        </span>
                       </div>
 
-                      <span className={`text-[10px] font-medium px-2 py-0.5 rounded ${
-                        !no.online
-                          ? 'bg-rose-500/10 text-rose-400'
-                          : no.statusConsenso === 'DESCARTADO_BIZANTINO'
-                          ? 'bg-amber-500/15 text-amber-300'
-                          : 'bg-emerald-500/15 text-emerald-400'
-                      }`}>
-                        {!no.online ? 'Offline' : no.statusConsenso === 'DESCARTADO_BIZANTINO' ? 'Bizantino' : 'Voto Válido'}
-                      </span>
+                      {/* Linha secundária exibindo se o nó grava no MongoDB ou opera em Fallback RAM */}
+                      <div className="flex items-center gap-1.5 text-[10px] font-mono pl-4">
+                        {!no.online ? (
+                          /* Indica que o banco não pôde ser verificado porque o controlador está offline */
+                          <span className="text-zinc-500">Banco: inacessível (nó offline)</span>
+                        ) : bancoConectado ? (
+                          /* Exibe indicador verde confirmando persistência real no MongoDB */
+                          <>
+                            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shrink-0" />
+                            <span className="text-emerald-400/90 truncate">
+                              MongoDB {portaBancoLabel} conectado
+                            </span>
+                          </>
+                        ) : (
+                          /* Exibe indicador âmbar alertando que o nó está em Fallback RAM */
+                          <>
+                            <span className="h-1.5 w-1.5 rounded-full bg-amber-400 shrink-0" />
+                            <span className="text-amber-300/90 truncate">
+                              Fallback RAM (MongoDB {portaBancoLabel} offline)
+                            </span>
+                          </>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
 
             {/* Bloco 5: Console de Auditoria e Failover com Altura e Largura RIGIDAMENTE FIXAS (Nunca expande com logs) */}
-            <div className="rounded-xl border border-zinc-800/80 bg-zinc-900/30 p-4 h-[300px] min-h-[300px] max-h-[290px] w-full min-w-0 max-w-full overflow-hidden flex flex-col space-y-2.5 shrink-0">
+            <div className="rounded-xl border border-zinc-800/80 bg-zinc-900/30 p-4 h-[300px] min-h-[300px] max-h-[300px] w-full min-w-0 max-w-full overflow-hidden flex flex-col space-y-2.5 shrink-0">
               {/* Cabeçalho do Console de Auditoria com Dimensão Fixa */}
               <div className="flex items-center justify-between border-b border-zinc-800/60 pb-2 shrink-0">
                 {/* Título do Console */}
@@ -891,7 +1030,7 @@ export default function DashboardPage() {
                   </h2>
                 </div>
 
-                {/* Botões de Filtro */}
+                {/* Botões de Filtro incluindo visualização direta do Histórico MongoDB */}
                 <div className="flex gap-1 text-[10px]">
                   <button
                     type="button"
@@ -907,12 +1046,40 @@ export default function DashboardPage() {
                   >
                     Failover
                   </button>
+                  {/* Aba que exibe os registros persistidos no histórico do controlador/MongoDB */}
+                  <button
+                    type="button"
+                    onClick={() => setFiltroLog('HISTORICO_DB')}
+                    className={`px-2 py-0.5 rounded transition ${filtroLog === 'HISTORICO_DB' ? 'bg-emerald-950/70 text-emerald-300 border border-emerald-500/30' : 'text-zinc-500 hover:text-zinc-300'}`}
+                  >
+                    MongoDB
+                  </button>
                 </div>
               </div>
 
               {/* Área Interna de Rolagem com Altura Imutável (215px cravados) que Força a Rolagem sem Expandir o Card */}
               <div className="h-[215px] min-h-[215px] max-h-[215px] w-full min-w-0 max-w-full overflow-y-auto overflow-x-hidden rounded-lg border border-zinc-800/80 bg-zinc-950/70 p-3 font-mono text-[11px] space-y-2 shrink-0">
-                {logsApresentados.length === 0 ? (
+                {filtroLog === 'HISTORICO_DB' ? (
+                  /* Renderiza o histórico real retornado no campo estadoConsenso.historico */
+                  (estadoConsenso?.historico?.length ?? 0) === 0 ? (
+                    <p className="text-zinc-600 text-xs">Nenhum registro no histórico persistido ainda...</p>
+                  ) : (
+                    estadoConsenso?.historico?.map((reg, idx) => (
+                      <div key={`${reg.horario}-${idx}`} className="border-b border-zinc-900 pb-1.5 last:border-0 min-w-0">
+                        <div className="flex items-center gap-1.5 text-[10px] text-zinc-500">
+                          {/* Exibe o horário formatado do evento salvo */}
+                          <span>{formatarHorarioRegistro(reg.horario)}</span>
+                          {/* Badge identificando a categoria do registro persistido */}
+                          <span className="px-1 rounded text-emerald-300 bg-emerald-950/50">
+                            {reg.tipo}
+                          </span>
+                        </div>
+                        {/* Descrição completa do evento registrado no histórico */}
+                        <p className="text-zinc-300 mt-0.5 break-words">{reg.descricao}</p>
+                      </div>
+                    ))
+                  )
+                ) : logsApresentados.length === 0 ? (
                   <p className="text-zinc-600 text-xs">Aguardando eventos do sistema...</p>
                 ) : (
                   logsApresentados.map((log) => (

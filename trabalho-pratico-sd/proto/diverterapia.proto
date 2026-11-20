@@ -33,18 +33,6 @@ message InvocarMetodoRequest {
   ParametrosAtuadores parametros = 3;
 }
 
-// Mensagem que representa um item individual na Fila de Espera Distribuída de pacientes
-message ItemFilaEsperaMessage {
-  // Nome do paciente na fila
-  string nome = 1;
-  // Estilo musical selecionado pelo paciente
-  string musica = 2;
-  // Cor de iluminação preferida
-  string cor = 3;
-  // Horário em que o paciente realizou o check-in
-  string horario = 4;
-}
-
 // Mensagem que modela um registro no histórico de auditoria do MongoDB
 message RegistroHistoricoMessage {
   // Data e hora do evento no formato ISO
@@ -79,8 +67,8 @@ message EstadoSalaData {
   bool modoCalmaAtivo = 10;
   // Timestamp limite para prioridade do comando manual (override)
   int64 overrideManualAte = 11;
-  // Lista de pacientes aguardando vaga na sala
-  repeated ItemFilaEsperaMessage filaEspera = 12;
+  // Reserva o campo 12 anteriormente usado para fila de espera removida
+  reserved 12;
   // Data e hora da última sincronização no formato ISO
   string ultimaAtualizacao = 13;
   // Histórico de auditoria persistido no MongoDB
@@ -115,13 +103,15 @@ message SucessoResponse {
   string mensagem = 5;
   // Estado atualizado da sala após a execução do método
   EstadoSalaData estado = 6;
+  // Flag indicando se a simulação de falha bizantina está ativa no Controlador 3
+  bool simularFalhaBizantina = 7;
 }
 
 // Requisição de votação enviada pelo Líder aos demais controladores
 message VotoRequest {
   // Identificador do controlador líder (ex: "controlador-1")
   string liderId = 1;
-  // Tipo do evento acionador (ex: "TELEMETRIA_RUIDO", "METODO_MANUAL", "FILA")
+  // Tipo do evento acionador (ex: "TELEMETRIA", "INVOCACAO_METODO")
   string tipoEvento = 2;
   // Estado candidato gerado pelo Líder a ser submetido ao Quorum
   EstadoSalaData estadoCandidato = 3;

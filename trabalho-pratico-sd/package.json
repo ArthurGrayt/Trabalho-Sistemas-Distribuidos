@@ -2,8 +2,10 @@
   "name": "trabalho-pratico-sd",
   "version": "1.0.0",
   "description": "Middleware IoT Distribuído para Clínica Pediátrica (Diverterapia) - Sistemas Distribuídos",
-  "main": "mqtt-broker/broker.ts",
+  "main": "controladores/controlador1.ts",
   "scripts": {
+    "infra:up": "docker compose up -d",
+    "infra:down": "docker compose down",
     "broker": "npx tsx mqtt-broker/broker.ts",
     "sensor:ruido": "npx tsx sensores/sensorRuido.ts",
     "sensor:bpm": "npx tsx sensores/sensorBPM.ts",

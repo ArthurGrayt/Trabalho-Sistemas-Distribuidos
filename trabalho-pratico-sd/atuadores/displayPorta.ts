@@ -1,8 +1,8 @@
 // Importa a biblioteca 'mqtt' para conectar o painel eletrônico da porta da sala ao broker
 import mqtt from 'mqtt';
 
-// Define o endereço de conexão com o broker MQTT local
-const BROKER_URL = 'mqtt://localhost:1883';
+// Define o endereço de conexão com o broker MQTT local (127.0.0.1 para evitar atrasos IPv6 no Windows)
+const BROKER_URL = 'mqtt://127.0.0.1:1883';
 // Define o tópico de comando para atualizar as mensagens do display da porta da Sala 1
 const TOPIC_COMANDO = 'clinica/sala1/comando/display';
 

@@ -1,8 +1,8 @@
 // Importa a biblioteca 'mqtt' para permitir que o Smart Speaker atue como Subscriber de comandos
 import mqtt from 'mqtt';
 
-// Define o endereço de rede do broker MQTT local
-const BROKER_URL = 'mqtt://localhost:1883';
+// Define o endereço de rede do broker MQTT local (127.0.0.1 para evitar atrasos IPv6 no Windows)
+const BROKER_URL = 'mqtt://127.0.0.1:1883';
 // Define o tópico de comando que este atuador deve assinar para receber instruções dos controladores
 const TOPIC_COMANDO = 'clinica/sala1/comando/som';
 

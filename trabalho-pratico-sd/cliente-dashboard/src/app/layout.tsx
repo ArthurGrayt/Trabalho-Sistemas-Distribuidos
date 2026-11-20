@@ -20,11 +20,11 @@ export default function RootLayout({
   // Tipagem estrita do React para nós filhos
   children: React.ReactNode;
 }) {
-  // Retorna a estrutura HTML principal em Português do Brasil
+  // Retorna a estrutura HTML principal em Português do Brasil com suppressHydrationWarning para ignorar atributos injetados por extensões do navegador (ex: data-bry-content-script-soc)
   return (
-    <html lang="pt-BR">
-      {/* Aplica suavização de fontes (antialiased) e altura mínima de tela cheia */}
-      <body className="min-h-screen bg-slate-950 text-slate-100 antialiased">
+    <html lang="pt-BR" suppressHydrationWarning>
+      {/* Aplica suavização de fontes (antialiased), altura mínima de tela cheia e suprime avisos de hidratação causados por extensões no body */}
+      <body suppressHydrationWarning className="min-h-screen bg-slate-950 text-slate-100 antialiased">
         {/* Renderiza o conteúdo da página ativa */}
         {children}
       </body>
