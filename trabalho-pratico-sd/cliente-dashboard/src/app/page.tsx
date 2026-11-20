@@ -277,6 +277,10 @@ export default function DashboardPage() {
               ? no.integridade === 'LIDER_INTERINO'
                 ? 'Controlador 2 (Líder Interino)'
                 : 'Controlador 2 (Réplica)'
+              : no.integridade === 'LIDER_INTERINO'
+              ? 'Controlador 3 (Líder Interino)'
+              : no.integridade === 'HONESTO'
+              ? 'Controlador 3 (Honesto)'
               : 'Controlador 3 (Bizantino)';
 
           // Classifica o status de consenso com base na conectividade real e integridade declarada
@@ -307,16 +311,25 @@ export default function DashboardPage() {
         const no3 = clusterReal.find((n) => n.porta === 3003);
 
         if (!res.ok || dadosLider?.clusterIndisponivel) {
+          // Sinaliza indisponibilidade se nenhum nó íntegro respondeu
           setResumoQuorum('Cluster indisponível — Nenhum controlador íntegro acessível.');
+        } else if (!no1?.online && !no2?.online && no3?.online && no3?.integridade !== 'FALHA_BIZANTINA') {
+          // Destaca a assunção de C3 como líder interino de contingência máxima
+          setResumoQuorum('Failover de 2º Nível Ativo — Controlador 3 operando como Líder Interino (C1 e C2 offline).');
         } else if (!no1?.online && no2?.online) {
+          // Destaca failover para C2
           setResumoQuorum('Failover Ativo — Controlador 2 operando como Líder Interino.');
         } else if (no3?.online && no3?.integridade === 'FALHA_BIZANTINA') {
+          // Quorum 2x1 com descarte de voto bizantino
           setResumoQuorum('Quorum 2x1 Validado no Backend — Voto bizantino do Nó 3 descartado pelo Líder.');
         } else if (no1?.online && no2?.online && no3?.online) {
+          // Todos os 3 nós íntegros
           setResumoQuorum('Consenso Unânime (3/3) — 3 réplicas íntegras sincronizadas no Backend.');
         } else if (no1?.online && (no2?.online || no3?.online)) {
+          // Quorum parcial
           setResumoQuorum('Quorum 2x1 Validado no Backend — Cluster operando com contingência parcial.');
         } else {
+          // Caso degradado
           setResumoQuorum('Cluster degradado — Menos de 2 nós íntegros disponíveis.');
         }
       }
@@ -637,7 +650,14 @@ export default function DashboardPage() {
     const no1 = nosControladores.find((n) => n.porta === 3001);
     // Obtém o nó 2
     const no2 = nosControladores.find((n) => n.porta === 3002);
-    // Caso C1 esteja fora e C2 online, estamos no Cenário 2 (Failover / Líder Interino)
+    // Obtém o nó 3
+    const no3 = nosControladores.find((n) => n.porta === 3003);
+    // Caso C1 e C2 estejam fora e C3 online e honesto -> Cenário 2 (Failover de 2º Nível para C3)
+    if (!no1?.online && !no2?.online && no3?.online && no3?.integridade !== 'FALHA_BIZANTINA') {
+      // Retorna 2 para indicar Cenário 2 (Failover Ativo)
+      return 2;
+    }
+    // Caso C1 esteja fora e C2 online, estamos no Cenário 2 (Failover / Líder Interino C2)
     if (no1 && !no1.online && no2 && no2.online) {
       // Retorna 2 para indicar Cenário 2
       return 2;
@@ -652,7 +672,7 @@ export default function DashboardPage() {
       // Retorna 3 para indicar Cenário 3 / Recuperação
       return 3;
     }
-    // Caso ambos estejam fora
+    // Caso todos estejam fora
     return 0;
   }, [nosControladores]);
 
@@ -787,156 +807,7 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* Painel Interativo de Demonstração dos 3 Cenários de Sistemas Distribuídos */}
-        <div className="rounded-xl border border-zinc-800/80 bg-zinc-900/40 p-4 space-y-3">
-          {/* Cabeçalho do Painel com Título Didático e Badge do Cenário Ativo */}
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border-b border-zinc-800/60 pb-3">
-            {/* Bloco de Título */}
-            <div>
-              {/* Título Principal */}
-              <h2 className="text-xs font-semibold text-zinc-100 uppercase tracking-wider flex items-center gap-2">
-                {/* Ícone de capelo acadêmico */}
-                <span>🎓 Cenários de Sistemas Distribuídos</span>
-                {/* Badge dinâmica do Cenário em Tempo Real */}
-                <span className={`text-[10px] px-2 py-0.5 rounded-full font-mono font-medium ${
-                  cenarioAtivo === 1
-                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                    : cenarioAtivo === 2
-                    ? 'bg-blue-500/20 text-blue-300 border border-blue-500/30 animate-pulse'
-                    : cenarioAtivo === 3
-                    ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30'
-                    : 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
-                }`}>
-                  {cenarioAtivo === 1
-                    ? 'Cenário 1 Ativo (Normal)'
-                    : cenarioAtivo === 2
-                    ? 'Cenário 2 Ativo (Failover C1 ➜ C2)'
-                    : cenarioAtivo === 3
-                    ? 'Cenário 3 Ativo (Catch-up / Recuperado)'
-                    : 'Cluster Degradado'}
-                </span>
-              </h2>
-              {/* Subtítulo explicativo */}
-              <p className="text-[11px] text-zinc-400 mt-0.5">
-                Alterne falhas por parada (Crash), eleição/failover por heartbeat e catch-up entre os controladores em 1 clique.
-              </p>
-            </div>
-            {/* Identificação do Líder em tempo real */}
-            <div className="flex items-center gap-2">
-              <span className="text-[11px] font-mono text-zinc-400">
-                Líder Atual: <strong className="text-zinc-200">{!nosControladores.find(n => n.porta === 3001)?.online ? 'Controlador 2 (Interino 👑)' : 'Controlador 1'}</strong>
-              </span>
-            </div>
-          </div>
-
-          {/* Grid dos 3 Cenários Distribuídos */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-            {/* Card Cenário 1: Operação Normal & Quorum 2x1 */}
-            <div className={`p-3.5 rounded-lg border transition-all flex flex-col justify-between gap-3 ${
-              cenarioAtivo === 1
-                ? 'border-emerald-500/50 bg-emerald-950/20 shadow-sm ring-1 ring-emerald-500/20'
-                : 'border-zinc-800/80 bg-zinc-900/50 opacity-80 hover:opacity-100'
-            }`}>
-              {/* Informações técnicas do cenário 1 */}
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between">
-                  {/* Nome do Cenário 1 */}
-                  <span className="text-xs font-semibold text-zinc-200">1. Operação Normal</span>
-                  {/* Etiqueta de status */}
-                  <span className={`text-[9px] px-1.5 py-0.5 rounded font-mono ${
-                    cenarioAtivo === 1 ? 'bg-emerald-500/20 text-emerald-300' : 'bg-zinc-800 text-zinc-400'
-                  }`}>
-                    {cenarioAtivo === 1 ? '● EM EXECUÇÃO' : 'Quorum 2x1'}
-                  </span>
-                </div>
-                {/* Descrição acadêmica do Cenário 1 */}
-                <p className="text-[11px] text-zinc-400 leading-relaxed">
-                  C1 atua como Líder Primário, C2 como Réplica Honesta e C3 é avaliado por Quorum 2x1 (descartando adulterações bizantinas).
-                </p>
-              </div>
-              {/* Botão de disparo do Cenário 1 */}
-              <button
-                type="button"
-                onClick={dispararCenario1}
-                className="w-full py-1.5 px-3 rounded text-[11px] font-medium border border-zinc-700 bg-zinc-800/80 text-zinc-200 hover:bg-zinc-700 hover:text-white transition"
-              >
-                Restaurar Cenário 1
-              </button>
-            </div>
-
-            {/* Card Cenário 2: Queda do Líder & Failover Automático */}
-            <div className={`p-3.5 rounded-lg border transition-all flex flex-col justify-between gap-3 ${
-              cenarioAtivo === 2
-                ? 'border-blue-500/50 bg-blue-950/20 shadow-sm ring-1 ring-blue-500/20'
-                : 'border-zinc-800/80 bg-zinc-900/50 opacity-80 hover:opacity-100'
-            }`}>
-              {/* Informações técnicas do cenário 2 */}
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between">
-                  {/* Nome do Cenário 2 */}
-                  <span className="text-xs font-semibold text-zinc-200">2. Queda &amp; Failover</span>
-                  {/* Etiqueta de status */}
-                  <span className={`text-[9px] px-1.5 py-0.5 rounded font-mono ${
-                    cenarioAtivo === 2 ? 'bg-blue-500/20 text-blue-300' : 'bg-zinc-800 text-zinc-400'
-                  }`}>
-                    {cenarioAtivo === 2 ? '👑 LÍDER INTERINO' : 'Heartbeat 1.5s'}
-                  </span>
-                </div>
-                {/* Descrição acadêmica do Cenário 2 */}
-                <p className="text-[11px] text-zinc-400 leading-relaxed">
-                  Derruba C1. C2 detecta timeout de heartbeat em 1.5s, assume como Líder Interino (👑), grava no MongoDB 2 e comanda atuadores.
-                </p>
-              </div>
-              {/* Botão de disparo do Cenário 2 */}
-              <button
-                type="button"
-                onClick={dispararCenario2}
-                className="w-full py-1.5 px-3 rounded text-[11px] font-medium border border-rose-900/60 bg-rose-950/40 text-rose-300 hover:bg-rose-900/60 hover:text-white transition flex items-center justify-center gap-1.5"
-              >
-                {/* Ícone de caveira */}
-                <span>💀</span>
-                {/* Rótulo da ação */}
-                <span>Derrubar C1 (Disparar Failover)</span>
-              </button>
-            </div>
-
-            {/* Card Cenário 3: Recuperação & Sincronização Catch-up */}
-            <div className={`p-3.5 rounded-lg border transition-all flex flex-col justify-between gap-3 ${
-              cenarioAtivo === 3
-                ? 'border-purple-500/50 bg-purple-950/20 shadow-sm ring-1 ring-purple-500/20'
-                : 'border-zinc-800/80 bg-zinc-900/50 opacity-80 hover:opacity-100'
-            }`}>
-              {/* Informações técnicas do cenário 3 */}
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between">
-                  {/* Nome do Cenário 3 */}
-                  <span className="text-xs font-semibold text-zinc-200">3. Recuperação &amp; Catch-up</span>
-                  {/* Etiqueta de status */}
-                  <span className={`text-[9px] px-1.5 py-0.5 rounded font-mono ${
-                    cenarioAtivo === 3 ? 'bg-purple-500/20 text-purple-300' : 'bg-zinc-800 text-zinc-400'
-                  }`}>
-                    {cenarioAtivo === 3 ? '🔄 SINCRONIZADO' : 'Zero Perda'}
-                  </span>
-                </div>
-                {/* Descrição acadêmica do Cenário 3 */}
-                <p className="text-[11px] text-zinc-400 leading-relaxed">
-                  Revive C1. C1 executa Catch-up com C2 absorvendo transações perdidas, C2 devolve a liderança pacificamente e o cluster se estabiliza.
-                </p>
-              </div>
-              {/* Botão de disparo do Cenário 3 */}
-              <button
-                type="button"
-                onClick={dispararCenario3}
-                className="w-full py-1.5 px-3 rounded text-[11px] font-medium border border-emerald-900/60 bg-emerald-950/40 text-emerald-300 hover:bg-emerald-900/60 hover:text-white transition flex items-center justify-center gap-1.5"
-              >
-                {/* Ícone de raio */}
-                <span>⚡</span>
-                {/* Rótulo da ação */}
-                <span>Reviver C1 (Executar Catch-up)</span>
-              </button>
-            </div>
-          </div>
-        </div>
+      
 
         {/* Layout Principal em 2 Colunas com proporção ajustada (+15% na coluna esquerda) */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">

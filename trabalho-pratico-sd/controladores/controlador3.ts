@@ -39,6 +39,24 @@ const BROKER_URL = 'mqtt://127.0.0.1:1883';
 let simularFalhaBizantina = true;
 // Flag que controla a simulação de falha por parada (Crash Fault) acionada via Dashboard
 let falhaParadaSimulada = false;
+// Flag que rastreia se algum dos líderes superiores (Controlador 1 ou 2) está online
+let lideresSuperioresOnline = true;
+
+// Fila sequencial para serializar operações do Controlador 3 quando atuando como Líder Interino
+let filaOperacoes: Promise<void> = Promise.resolve();
+
+// Função auxiliar que encadeia tarefas críticas em ordem FIFO
+function enfileirarOperacao<T>(tarefa: () => Promise<T>): Promise<T> {
+  // Encadeia a próxima tarefa após a conclusão da anterior
+  const execucao = filaOperacoes.then(tarefa, tarefa);
+  // Atualiza o ponteiro da fila ignorando rejeições para não travar a fila
+  filaOperacoes = execucao.then(
+    () => undefined,
+    () => undefined
+  );
+  // Retorna a Promise original da tarefa
+  return execucao;
+}
 
 // Resolve o caminho absoluto do contrato Protobuf único na raiz do projeto
 const PROTO_PATH = path.resolve(__dirname, '../proto/diverterapia.proto');
@@ -192,6 +210,129 @@ async function sincronizarCatchUpComLider(): Promise<void> {
   }
 }
 
+// Define opções de reconexão rápida para os clientes gRPC de heartbeat e monitoramento
+const GRPC_INTERNO_OPTIONS: grpc.ClientOptions = {
+  // Reduz o backoff inicial de reconexão HTTP/2 de 1000ms para 150ms
+  'grpc.initial_reconnect_backoff_ms': 150,
+  // Limita o backoff máximo em 1000ms para agilidade na detecção de falhas
+  'grpc.max_reconnect_backoff_ms': 1000,
+};
+
+// Clientes gRPC para monitorar a disponibilidade de C1 e C2
+const clientLider1 = new diverterapiaProto.MiddlewareClinico(
+  `127.0.0.1:${GRPC_PORT_1}`,
+  grpc.credentials.createInsecure(),
+  GRPC_INTERNO_OPTIONS
+);
+const clientLider2 = new diverterapiaProto.MiddlewareClinico(
+  `127.0.0.1:${GRPC_PORT_2}`,
+  grpc.credentials.createInsecure(),
+  GRPC_INTERNO_OPTIONS
+);
+
+// Inicia o heartbeat periódico de 1500ms para monitorar C1 e C2 e assumir liderança se ambos caírem
+function iniciarMonitoramentoLideres(): void {
+  // Executa checagem periódica a cada 1500ms
+  setInterval(() => {
+    // Se o próprio Controlador 3 estiver simulando parada, não monitora nem assume liderança
+    if (falhaParadaSimulada) {
+      // Retorna precocemente
+      return;
+    }
+
+    // Prazo de resposta de 600ms para o nó 1
+    const deadline1 = new Date(Date.now() + 600);
+    // Consulta o Controlador 1
+    clientLider1.ObterStatus({}, new grpc.Metadata(), { deadline: deadline1 }, (err1: any) => {
+      // Se C1 respondeu com sucesso, C1 é o líder primário ativo
+      if (!err1) {
+        // Se C3 estava atuando como líder, cede a liderança de volta
+        if (!lideresSuperioresOnline) {
+          // Marca que os líderes superiores estão de volta
+          lideresSuperioresOnline = true;
+          // Loga a transição de volta ao modo réplica
+          console.log(`🔄 [${CONTROLLER_ID}] Controlador 1 online! Retornando ao papel de réplica.`);
+        }
+        // Encerra a verificação desta iteração
+        return;
+      }
+
+      // Se C1 está offline, consulta o Controlador 2 (segunda linha de liderança)
+      const deadline2 = new Date(Date.now() + 600);
+      clientLider2.ObterStatus({}, new grpc.Metadata(), { deadline: deadline2 }, (err2: any) => {
+        // Se C2 respondeu com sucesso, C2 é o líder interino
+        if (!err2) {
+          // Se C3 estava como líder interino, cede a liderança para C2
+          if (!lideresSuperioresOnline) {
+            // Marca que C2 está no comando
+            lideresSuperioresOnline = true;
+            // Loga a cessão de liderança
+            console.log(`🔄 [${CONTROLLER_ID}] Controlador 2 online! C2 assumiu a liderança interina.`);
+          }
+          // Encerra
+          return;
+        }
+
+        // Se TANTO C1 QUANTO C2 ESTIVEREM OFFLINE:
+        // Se C3 estiver em modo honesto (sem erro bizantino), assume como Líder Interino!
+        if (!simularFalhaBizantina) {
+          // Promove C3 a líder caso ainda não tenha assumido
+          if (lideresSuperioresOnline) {
+            // Marca que C3 assumiu a liderança
+            lideresSuperioresOnline = false;
+            // Loga a promoção de C3
+            console.log(`👑 [${CONTROLLER_ID}] C1 e C2 offline! Controlador 3 em modo honesto assumindo liderança interina (Failover de 2º Nível).`);
+          }
+        } else {
+          // Se estiver em modo bizantino, não assume a liderança oficial
+          if (!lideresSuperioresOnline) {
+            // Mantém flag de líder inativo
+            lideresSuperioresOnline = true;
+          }
+        }
+      });
+    });
+  }, 1500);
+}
+
+// Executa eventos clínicos como Líder Interino quando C1 e C2 estão offline e C3 opera em modo honesto
+async function executarComoLiderInterino(
+  tipoEvento: string,
+  descricao: string,
+  candidato: EstadoSala,
+  publicarAtuadores: boolean
+): Promise<boolean> {
+  // Registra no console a ação do Líder Interino C3
+  console.log(`👑 [${CONTROLLER_ID} - LÍDER INTERINO] ${descricao} | Executando em contingência máxima (C1 e C2 offline).`);
+
+  // Atualiza os estados locais confirmados
+  estadoConfirmado = normalizarEstadoRecebido(candidato);
+  // Atualiza o estado independente de telemetria
+  estadoTelemetria = clonarEstado(estadoConfirmado);
+
+  // Persiste no MongoDB 3 marcando que foi efetivado pelo Líder Interino C3
+  const persistidoMongo = await salvarReplicaMongoDB(
+    tipoEvento,
+    `${descricao} [Efetivado por Líder Interino C3]`,
+    true
+  );
+
+  // Publica comandos aos atuadores via Mosquitto
+  if (publicarAtuadores && mqttClient) {
+    // Despacha as ordens aos atuadores físicos
+    publicarComandosAtuadores(mqttClient, estadoConfirmado, CONTROLLER_ID);
+  }
+
+  // Alerta caso o MongoDB 3 esteja offline
+  if (!persistidoMongo) {
+    // Exibe aviso de persistência em RAM
+    console.warn(`⚠️ [${CONTROLLER_ID} - LÍDER INTERINO] MongoDB 3 offline — mantido em RAM.`);
+  }
+
+  // Retorna sucesso
+  return true;
+}
+
 // Classe que implementa o Objeto Distribuído da Réplica 3
 class ControladorProcessoSala3 {
   // Retorna um snapshot seguro do estado em memória evitando sobrescrita fora da fila durante polling
@@ -201,11 +342,18 @@ class ControladorProcessoSala3 {
     // Adultera apenas a cópia retornada se a simulação bizantina estiver ligada
     const estadoRetornado = simularFalhaBizantina ? gerarEstadoAdulterado(estadoReal) : estadoReal;
 
+    // Determina a integridade: se for bizantino, declara FALHA_BIZANTINA; se honesto e líderes caídos, LIDER_INTERINO; senão HONESTO
+    const integridade = simularFalhaBizantina
+      ? 'FALHA_BIZANTINA'
+      : !lideresSuperioresOnline
+      ? 'LIDER_INTERINO'
+      : 'HONESTO';
+
     return {
       controlador: CONTROLLER_ID,
       porta: GRPC_PORT,
       armazenamentoId: persistenciaMongo.obterArmazenamentoId(),
-      integridade: simularFalhaBizantina ? 'FALHA_BIZANTINA' : 'HONESTO',
+      integridade,
       estado: estadoRetornado,
     };
   }
@@ -225,26 +373,40 @@ class ControladorProcessoSala3 {
       };
     }
 
-    // Executa normalmente se estiver operando em modo honesto
-    estadoConfirmado = aplicarModoCalmaManual(estadoConfirmado, origemCliente);
-    estadoTelemetria = clonarEstado(estadoConfirmado);
-    const gravouBanco = await salvarReplicaMongoDB('INVOCACAO_METODO', `Modo Calma Manual (${origemCliente})`, true);
-    // Publica aos atuadores somente se o cliente MQTT já estiver inicializado
-    if (mqttClient) {
-      publicarComandosAtuadores(mqttClient, estadoConfirmado, CONTROLLER_ID);
+    // Se chamado diretamente pelo gateway e C1/C2 não responderam, assume liderança
+    if (lideresSuperioresOnline) {
+      // Ativa liderança interina
+      lideresSuperioresOnline = false;
+      // Loga assunção do comando
+      console.log(`👑 [${CONTROLLER_ID}] C1 e C2 offline! Assumindo liderança interina em modo honesto (Failover C3).`);
     }
 
-    return {
-      sucesso: true,
-      metodoInvocado: 'ativarModoCalmaManual()',
-      processadoPor: CONTROLLER_ID,
-      porta: GRPC_PORT,
-      mensagem: gravouBanco
-        ? `Método executado e persistido no MongoDB 3 pelo ${CONTROLLER_ID}!`
-        : `Método executado e mantido em RAM (MongoDB 3 offline) pelo ${CONTROLLER_ID}!`,
-      estado: estadoConfirmado,
-      simularFalhaBizantina: false,
-    };
+    // Enfileira a operação sequencialmente
+    return enfileirarOperacao(async () => {
+      // Aplica regra de modo calma
+      const candidato = aplicarModoCalmaManual(estadoConfirmado, origemCliente);
+      // Executa como líder interino
+      await executarComoLiderInterino(
+        'INVOCACAO_METODO',
+        `Modo Calma Manual via Failover C3 (${origemCliente})`,
+        candidato,
+        true
+      );
+      // Avalia onde gravou
+      const destino = persistenciaMongo.estaConectado()
+        ? 'persistido no MongoDB 3'
+        : 'mantido em RAM (MongoDB 3 offline)';
+      // Retorna resultado tipado
+      return {
+        sucesso: true,
+        metodoInvocado: 'ativarModoCalmaManual()',
+        processadoPor: CONTROLLER_ID,
+        porta: GRPC_PORT,
+        mensagem: `Método executado em Failover (Líder Interino C3) e ${destino}!`,
+        estado: estadoConfirmado,
+        simularFalhaBizantina: false,
+      };
+    });
   }
 
   // Configura atuadores caso C1 e C2 estejam offline (contingência extrema)
@@ -252,6 +414,7 @@ class ControladorProcessoSala3 {
     origemCliente: string,
     parametros: { corLuz?: string; somSpeaker?: string; textoDisplay?: string }
   ) {
+    // Recusa caso esteja operando com falha bizantina
     if (simularFalhaBizantina) {
       return {
         sucesso: false,
@@ -264,29 +427,40 @@ class ControladorProcessoSala3 {
       };
     }
 
-    estadoConfirmado = aplicarConfigurarAtuadores(estadoConfirmado, parametros);
-    estadoTelemetria = clonarEstado(estadoConfirmado);
-    const gravouBanco = await salvarReplicaMongoDB(
-      'INVOCACAO_METODO',
-      `Configuração de atuadores (${origemCliente}) via ${CONTROLLER_ID}`,
-      true
-    );
-    // Publica aos atuadores somente se o cliente MQTT já estiver inicializado
-    if (mqttClient) {
-      publicarComandosAtuadores(mqttClient, estadoConfirmado, CONTROLLER_ID);
+    // Se chamado diretamente pelo gateway e C1/C2 não responderam, assume liderança
+    if (lideresSuperioresOnline) {
+      // Ativa liderança interina
+      lideresSuperioresOnline = false;
+      // Loga assunção do comando
+      console.log(`👑 [${CONTROLLER_ID}] C1 e C2 offline! Assumindo liderança interina em modo honesto (Failover C3).`);
     }
 
-    return {
-      sucesso: true,
-      metodoInvocado: 'configurarAtuadores()',
-      processadoPor: CONTROLLER_ID,
-      porta: GRPC_PORT,
-      mensagem: gravouBanco
-        ? `Atuadores configurados e persistidos no MongoDB 3!`
-        : `Atuadores configurados e mantidos em RAM (MongoDB 3 offline)!`,
-      estado: estadoConfirmado,
-      simularFalhaBizantina: false,
-    };
+    // Enfileira a operação sequencialmente
+    return enfileirarOperacao(async () => {
+      // Aplica configuração de atuadores
+      const candidato = aplicarConfigurarAtuadores(estadoConfirmado, parametros);
+      // Executa como líder interino
+      await executarComoLiderInterino(
+        'INVOCACAO_METODO',
+        `Configuração de atuadores via Failover C3 (${origemCliente})`,
+        candidato,
+        true
+      );
+      // Avalia onde gravou
+      const destino = persistenciaMongo.estaConectado()
+        ? 'persistidos no MongoDB 3'
+        : 'mantidos em RAM (MongoDB 3 offline)';
+      // Retorna resultado tipado
+      return {
+        sucesso: true,
+        metodoInvocado: 'configurarAtuadores()',
+        processadoPor: CONTROLLER_ID,
+        porta: GRPC_PORT,
+        mensagem: `Atuadores configurados em Failover (Líder Interino C3) e ${destino}!`,
+        estado: estadoConfirmado,
+        simularFalhaBizantina: false,
+      };
+    });
   }
 }
 
@@ -326,10 +500,34 @@ function iniciarMqtt(): void {
       return;
     }
     try {
+      // Decodifica o payload JSON
       const dados = JSON.parse(message.toString());
+      // Aplica a regra determinística na telemetria
       const resultado = aplicarEventoMqtt(estadoTelemetria, topic, dados);
+      // Se relevante, atualiza buffer
       if (resultado.relevante) {
         estadoTelemetria = resultado.candidato;
+      }
+
+      // Caso C1 e C2 estejam offline e C3 opere em modo honesto, atua como Líder Interino!
+      if (!lideresSuperioresOnline && !simularFalhaBizantina) {
+        // Enfileira a operação para garantir ordem sequencial
+        enfileirarOperacao(async () => {
+          // Checa novamente dentro da fila se a liderança ainda cabe a C3
+          if (lideresSuperioresOnline || simularFalhaBizantina) return;
+          // Aplica o evento sobre o estado confirmado
+          const resInterino = aplicarEventoMqtt(estadoConfirmado, topic, dados);
+          // Se relevante clinicamente, efetiva e publica
+          if (resInterino.relevante) {
+            // Executa como líder interino
+            await executarComoLiderInterino(
+              resInterino.tipoEvento,
+              resInterino.descricao,
+              resInterino.candidato,
+              resInterino.publicarAtuadores
+            );
+          }
+        });
       }
     } catch {
       // Ignora mensagens malformadas silenciosamente
@@ -458,6 +656,11 @@ grpcServer.addService(diverterapiaProto.MiddlewareClinico.service, {
     }
     simularFalhaBizantina = !simularFalhaBizantina;
     console.log(`⚠️ [${CONTROLLER_ID}] Modo Falha Bizantina alterado via gRPC para: ${simularFalhaBizantina ? 'ATIVO' : 'INATIVO'}`);
+    // Se o modo bizantino foi desligado e os líderes C1 e C2 estiverem caídos, C3 assume imediatamente
+    if (!simularFalhaBizantina && !lideresSuperioresOnline) {
+      // Notifica no terminal a assunção imediata
+      console.log(`👑 [${CONTROLLER_ID}] Modo honesto restaurado com C1 e C2 offline! Controlador 3 assumindo como Líder Interino.`);
+    }
     callback(null, {
       sucesso: true,
       metodoInvocado: 'ToggleBizantino()',
@@ -636,6 +839,8 @@ async function iniciarServidor(): Promise<void> {
   await sincronizarCatchUpComLider();
   // Conecta ao Broker Mosquitto somente após concluir o crash-recovery e catch-up
   iniciarMqtt();
+  // Inicia o monitoramento periódico de heartbeat dos líderes superiores C1 e C2
+  iniciarMonitoramentoLideres();
   // Inicia servidor gRPC na porta 3003
   grpcServer.bindAsync(
     `0.0.0.0:${GRPC_PORT}`,
